@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import mintIcon from './assets/mint.svg'
 import './App.css'
 
@@ -159,6 +159,8 @@ function App() {
   const [chartMode, setChartMode] = useState('bar')
   const [calendarViewMonth, setCalendarViewMonth] = useState(null)
   const [isLoaded, setIsLoaded] = useState(false)
+  const [clearConfirmStep, setClearConfirmStep] = useState(0)
+  const clearButtonRef = useRef(null)
 
   useEffect(() => {
     loadFromIndexedDB().then((data) => {
@@ -173,6 +175,19 @@ function App() {
     if (!isLoaded) return
     saveToIndexedDB({ tags, records, recordTags })
   }, [isLoaded, tags, records, recordTags])
+
+  useEffect(() => {
+    if (clearConfirmStep === 0) return
+
+    const handleDocumentClick = (event) => {
+      const button = clearButtonRef.current
+      if (button && button.contains(event.target)) return
+      setClearConfirmStep(0)
+    }
+
+    document.addEventListener('click', handleDocumentClick)
+    return () => document.removeEventListener('click', handleDocumentClick)
+  }, [clearConfirmStep])
 
   const handleFileChange = (e) => {
     const file = e.target.files?.[0]
@@ -236,6 +251,30 @@ function App() {
   const exportCsv = () => {
     const csvText = generateExportCsv()
     downloadCsv('mint-export.csv', csvText)
+  }
+
+  const resetAppData = () => {
+    setRecords([])
+    setTags([])
+    setRecordTags({})
+    setSelectedTags([])
+    setNewTagName('')
+    setShowTagModal(false)
+    setModalRecordIndex(0)
+    setError(null)
+    setDateFrom(new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0])
+    setDateTo(new Date().toISOString().split('T')[0])
+    setCalendarViewMonth(null)
+    saveToIndexedDB({ tags: [], records: [], recordTags: {} })
+  }
+
+  const handleClearClick = () => {
+    if (clearConfirmStep < 2) {
+      setClearConfirmStep((step) => step + 1)
+      return
+    }
+    resetAppData()
+    setClearConfirmStep(0)
   }
 
   const addTag = () => {
@@ -634,14 +673,25 @@ function App() {
       )}
       <header className="app-header">
         <h1> 🙓 mint </h1>
-        <button
-          type="button"
-          className="save-btn"
-          onClick={exportCsv}
-          disabled={records.length === 0}
-        >
-          Save
-        </button>
+        <div className="header-actions">
+          <button
+            type="button"
+            className="save-btn"
+            onClick={exportCsv}
+            disabled={records.length === 0}
+          >
+            Save
+          </button>
+          <button
+            type="button"
+            ref={clearButtonRef}
+            className={`reset-btn ${clearConfirmStep > 0 ? 'active' : ''} ${clearConfirmStep > 1 ? 'ready' : ''}`}
+            onClick={handleClearClick}
+            disabled={!isLoaded}
+          >
+            Clear{clearConfirmStep > 1 ? '🔥 ' : ''}
+          </button>
+        </div>
       </header>
       <div className="upload-section">
         <label className="file-label">

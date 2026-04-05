@@ -23,9 +23,39 @@
   gap: 0.5rem;
 }
 
+.reset-btn,
 .save-btn {
   padding: 0.6em 1em;
   border-radius: 8px;
+  font-size: 0.95rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+}
+
+.reset-btn {
+  border: 1px solid #d9534f;
+  background-color: transparent;
+  color: #d9534f;
+}
+
+.reset-btn:hover:not(:disabled) {
+  background-color: rgba(217, 83, 79, 0.1);
+}
+
+.reset-btn.active {
+  background-color: #d9534f;
+  color: #fff;
+}
+
+.reset-btn.ready {
+  box-shadow: 0 0 0 4px rgba(217, 83, 79, 0.18);
+}
+
+.save-btn {
+  border: 1px solid transparent;
+  background-color: #1a1a1a;
+  color: inherit;
   border: 1px solid transparent;
   background-color: #1a1a1a;
   color: inherit;
