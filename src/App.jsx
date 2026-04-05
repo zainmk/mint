@@ -115,6 +115,7 @@ function parseCSV(text) {
   const dateIdx = headerRow.findIndex((h) => /date/i.test(h))
   const titleIdx = headerRow.findIndex((h) => /title/i.test(h))
   const amountIdx = headerRow.findIndex((h) => /amount/i.test(h))
+  const tagIdx = headerRow.findIndex((h) => /tag/i.test(h))
   if (dateIdx === -1 || titleIdx === -1 || amountIdx === -1) return []
   return lines.slice(1).map((line) => {
     const values = parseRow(line)
@@ -122,8 +123,26 @@ function parseCSV(text) {
       date: values[dateIdx] ?? '',
       title: values[titleIdx] ?? '',
       amount: values[amountIdx] ?? '',
-    } 
+      tag: tagIdx !== -1 ? values[tagIdx] ?? '' : '',
+    }
   })
+}
+
+function quoteCsvValue(value) {
+  const raw = String(value ?? '')
+  return `"${raw.replace(/"/g, '""')}"`
+}
+
+function downloadCsv(filename, text) {
+  const blob = new Blob([text], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
 function App() {
@@ -176,9 +195,22 @@ function App() {
           setError('No valid records found. CSV must have Date, Title, and Amount columns.')
           return
         }
+
+        const nextTags = []
+        const nextRecordTags = {}
+        parsed.forEach((row, index) => {
+          const tag = row.tag?.trim()
+          if (tag && tag !== 'Untagged') {
+            nextRecordTags[index] = tag
+            if (!nextTags.includes(tag)) nextTags.push(tag)
+          }
+        })
+
         setRecords(parsed)
-        setRecordTags({})
-        if (tags.length > 0) {
+        setTags(nextTags)
+        setRecordTags(nextRecordTags)
+        setSelectedTags([...nextTags, 'Untagged'])
+        if (parsed.length > 0) {
           setModalRecordIndex(0)
           setShowTagModal(true)
         }
@@ -188,6 +220,22 @@ function App() {
     }
     reader.readAsText(file)
     e.target.value = ''
+  }
+
+  const generateExportCsv = () => {
+    const headers = ['Date', 'Title', 'Amount', 'Tag']
+    const rows = records.map((row, index) => {
+      const tag = recordTags[index] ?? 'Untagged'
+      return [row.date, row.title, row.amount, tag]
+    })
+    return [headers, ...rows]
+      .map((cells) => cells.map((cell) => quoteCsvValue(cell)).join(','))
+      .join('\r\n')
+  }
+
+  const exportCsv = () => {
+    const csvText = generateExportCsv()
+    downloadCsv('mint-export.csv', csvText)
   }
 
   const addTag = () => {
@@ -586,6 +634,14 @@ function App() {
       )}
       <header className="app-header">
         <h1> 🙓 mint </h1>
+        <button
+          type="button"
+          className="save-btn"
+          onClick={exportCsv}
+          disabled={records.length === 0}
+        >
+          Save
+        </button>
       </header>
       <div className="upload-section">
         <label className="file-label">
@@ -597,7 +653,7 @@ function App() {
           />
           Add CSV File
         </label>
-        <p className="hint">CSV must include columns: Date, Title, Amount</p>
+        <p className="hint">CSV must include columns: Date, Title, Amount and optional Tag for saved app exports</p>
       </div>
 
       {error && <p className="error">{error}</p>}
