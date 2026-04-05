@@ -254,6 +254,14 @@
   color: inherit;
   cursor: pointer;
   font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chart-tab-icon {
+  font-size: 1.2rem;
+  line-height: 1;
 }
 
 .chart-tab.active,

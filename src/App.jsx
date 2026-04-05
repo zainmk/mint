@@ -307,6 +307,7 @@ function App() {
     })
 
     const entries = [...tags.map((t) => [t, byTag[t] ?? 0]), ['Untagged', byTag['Untagged'] ?? 0]]
+      .sort((a, b) => b[1] - a[1])
     return entries.map(([tag, sum]) => ({ tag, sum }))
   }, [filteredRecords, recordTags, tags])
 
@@ -700,28 +701,31 @@ function App() {
                 type="button"
                 role="tab"
                 aria-selected={chartMode === 'bar'}
+                aria-label="Bar chart"
                 className={`chart-tab ${chartMode === 'bar' ? 'active' : ''}`}
                 onClick={() => setChartMode('bar')}
               >
-                Bar Chart
+                <span className="chart-tab-icon" aria-hidden="true"> ▯ </span>
               </button>
               <button
                 type="button"
                 role="tab"
                 aria-selected={chartMode === 'pie'}
+                aria-label="Pie chart"
                 className={`chart-tab ${chartMode === 'pie' ? 'active' : ''}`}
                 onClick={() => setChartMode('pie')}
               >
-                Pie Chart
+                <span className="chart-tab-icon" aria-hidden="true">⊗</span>
               </button>
               <button
                 type="button"
                 role="tab"
                 aria-selected={chartMode === 'calendar'}
+                aria-label="Calendar view"
                 className={`chart-tab ${chartMode === 'calendar' ? 'active' : ''}`}
                 onClick={() => setChartMode('calendar')}
               >
-                Calendar
+                <span className="chart-tab-icon" aria-hidden="true">🗓</span>
               </button>
             </div>
 
