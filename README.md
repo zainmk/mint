@@ -1,4 +1,4 @@
-# mint🙓
+# [mint](https://mint---box.vercel.app/)🙓
 web app to track credit card statement activity
 
 ### purpose
