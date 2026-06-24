@@ -1,7 +1,20 @@
-import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
+import DatePicker from 'react-datepicker'
+import 'react-datepicker/dist/react-datepicker.css'
 import './App.css'
 
 // ── Utilities ──────────────────────────────────────────────────────────────
+
+function strToDate(str) {
+  if (!str) return null
+  const [y, m, d] = str.split('-').map(Number)
+  return new Date(y, m - 1, d)
+}
+
+function dateToStr(date) {
+  if (!date) return ''
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
 
 function parseAmount(str) {
   const n = parseFloat(String(str || '').replace(/[^0-9.-]/g, ''))
@@ -130,7 +143,7 @@ function parseCSV(text) {
   }
   const hdr = parseRow(lines[0]).map((h) => h.replace(/^"|"$/g, '').trim())
   const di = hdr.findIndex((h) => /date/i.test(h))
-  const ti = hdr.findIndex((h) => /title/i.test(h))
+  const ti = hdr.findIndex((h) => /title|description/i.test(h))
   const ai = hdr.findIndex((h) => /amount/i.test(h))
   if (di === -1 || ti === -1 || ai === -1) return []
   return lines.slice(1).map((line) => {
@@ -166,6 +179,7 @@ function App() {
   const [modalRecordIndex, setModalRecordIndex] = useState(0)
   const [modalRecords, setModalRecords] = useState([])
   const [newTagName, setNewTagName] = useState('')
+  const [renamingTag, setRenamingTag] = useState(null) // { old, draft }
   // Filters & charts
   const [selectedTags, setSelectedTags] = useState([])
   const [dateFrom, setDateFrom] = useState(
@@ -177,6 +191,7 @@ function App() {
 
   const saveTimerRef = useRef(null)
   const dirHandleRef = useRef(null)
+  const dragTagIndex = useRef(null)
 
   useEffect(() => { dirHandleRef.current = dirHandle }, [dirHandle])
 
@@ -256,7 +271,7 @@ function App() {
       setRecords(newRecords)
       setTags(resolvedTags)
       setRecordTags(resolvedRecordTags)
-      setSelectedTags([...resolvedTags, 'Untagged'])
+      setSelectedTags([...resolvedTags, 'tagless'])
 
       if (openModal && newRecords.length > 0) {
         setModalRecordIndex(0)
@@ -354,6 +369,21 @@ function App() {
     setNewTagName('')
   }
 
+  const applyRename = () => {
+    if (!renamingTag) return
+    const { old, draft } = renamingTag
+    const newName = draft.trim()
+    setRenamingTag(null)
+    if (!newName || newName === old || tags.includes(newName)) return
+    setTags((prev) => prev.map((t) => (t === old ? newName : t)))
+    setRecordTags((prev) => {
+      const n = { ...prev }
+      for (const k of Object.keys(n)) { if (n[k] === old) n[k] = newName }
+      return n
+    })
+    setSelectedTags((prev) => prev.map((t) => (t === old ? newName : t)))
+  }
+
   const removeTag = (tag) => {
     setTags((t) => t.filter((x) => x !== tag))
     setRecordTags((prev) => {
@@ -367,7 +397,7 @@ function App() {
   // ── Derived state ──────────────────────────────────────────────────────────
 
   const sortedTags = [...tags].sort()
-  const allTagOptions = [...sortedTags, 'Untagged']
+  const allTagOptions = [...sortedTags, 'tagless']
 
   const tagColors = useMemo(
     () => Object.fromEntries(allTagOptions.map((t, i) => [t, TAG_COLORS[i % TAG_COLORS.length]])),
@@ -382,7 +412,7 @@ function App() {
       .filter(({ row }) => {
         const tag = recordTags[row._id] ?? null
         if (selectedTags.length > 0) {
-          const untaggedSel = selectedTags.includes('Untagged')
+          const untaggedSel = selectedTags.includes('tagless')
           if (!(untaggedSel && tag == null || (tag && selectedTags.includes(tag)))) return false
         }
         if (!from && !to) return true
@@ -423,12 +453,12 @@ function App() {
   const chartData = useMemo(() => {
     const by = {}
     tags.forEach((t) => { by[t] = 0 })
-    by['Untagged'] = 0
+    by['tagless'] = 0
     filteredRecords.forEach(({ row }) => {
-      const t = recordTags[row._id] ?? 'Untagged'
+      const t = recordTags[row._id] ?? 'tagless'
       by[t] = (by[t] ?? 0) + parseAmount(row.amount)
     })
-    return [...tags.map((t) => [t, by[t] ?? 0]), ['Untagged', by['Untagged'] ?? 0]]
+    return [...tags.map((t) => [t, by[t] ?? 0]), ['tagless', by['tagless'] ?? 0]]
       .sort((a, b) => b[1] - a[1])
       .map(([tag, sum]) => ({ tag, sum }))
   }, [filteredRecords, recordTags, tags])
@@ -458,7 +488,7 @@ function App() {
     filteredRecords.forEach(({ row }) => {
       const d = normalizeDateValue(row.date)
       if (!d) return
-      const tag = recordTags[row._id] ?? 'Untagged'
+      const tag = recordTags[row._id] ?? 'tagless'
       if (!by[d]) by[d] = {}
       by[d][tag] = (by[d][tag] || 0) + parseAmount(row.amount)
     })
@@ -498,6 +528,13 @@ function App() {
     return { min: months[0], max: months[months.length - 1] }
   }, [records])
 
+  const recordDateRange = useMemo(() => {
+    const dates = records.map((r) => normalizeDateValue(r.date)).filter(Boolean)
+    if (!dates.length) return { min: null, max: null }
+    dates.sort()
+    return { min: dates[0], max: dates[dates.length - 1] }
+  }, [records])
+
   const changeCalendarMonth = (delta) =>
     setCalendarViewMonth((cur) => {
       const [y, m] = cur ? cur.split('-').map(Number) : [new Date().getFullYear(), new Date().getMonth() + 1]
@@ -514,9 +551,6 @@ function App() {
   const handleSelectAll = (checked) => setSelectedTags(checked ? allTagOptions : [])
 
   const getTagShortcutKey = (i) => i < TAG_SHORTCUT_KEYS.length ? TAG_SHORTCUT_KEYS[i].toUpperCase() : null
-
-  // Progress
-  const totalCount = records.length
 
   // ── Render: pre-folder screens ─────────────────────────────────────────────
 
@@ -610,9 +644,36 @@ function App() {
               </div>
               {tags.length > 0 && (
                 <ul className="modal-tags-list">
-                  {tags.map((tag) => (
-                    <li key={tag} className="tag-chip">
-                      <span className="tag-chip-label">{tag}</span>
+                  {tags.map((tag, i) => (
+                    <li key={tag} className="tag-chip"
+                      draggable={renamingTag?.old !== tag}
+                      onDragStart={() => { dragTagIndex.current = i }}
+                      onDragOver={(e) => e.preventDefault()}
+                      onDrop={() => {
+                        const from = dragTagIndex.current
+                        if (from === null || from === i) return
+                        setTags((prev) => {
+                          const next = [...prev]
+                          const [moved] = next.splice(from, 1)
+                          next.splice(i, 0, moved)
+                          return next
+                        })
+                        dragTagIndex.current = null
+                      }}
+                      onDragEnd={() => { dragTagIndex.current = null }}
+                    >
+                      {renamingTag?.old === tag ? (
+                        <input
+                          className="tag-rename-input"
+                          value={renamingTag.draft}
+                          onChange={(e) => setRenamingTag((r) => ({ ...r, draft: e.target.value }))}
+                          onKeyDown={(e) => { if (e.key === 'Enter') applyRename(); if (e.key === 'Escape') setRenamingTag(null) }}
+                          onBlur={applyRename}
+                          autoFocus
+                        />
+                      ) : (
+                        <span className="tag-chip-label" title="Click to rename" onClick={() => setRenamingTag({ old: tag, draft: tag })}>{tag}</span>
+                      )}
                       <button type="button" onClick={() => removeTag(tag)} className="tag-chip-remove" aria-label={`Remove ${tag}`}>×</button>
                     </li>
                   ))}
@@ -737,20 +798,30 @@ function App() {
                   </label>
                 ))}
                 <label className="filter-checkbox">
-                  <input type="checkbox" checked={selectedTags.includes('Untagged')} onChange={() => toggleTag('Untagged')} />
-                  Untagged
+                  <input type="checkbox" checked={selectedTags.includes('tagless')} onChange={() => toggleTag('tagless')} />
+                  tagless
                 </label>
               </div>
             </div>
             <div className="date-filters-row">
-              <div className="table-filter">
-                <label htmlFor="date-from-filter" className="filter-label">From</label>
-                <input id="date-from-filter" type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="filter-date-input" />
+              {/* row 1: pickers */}
+              <div />
+              <div className="date-picker-wrap">
+                <DatePicker selected={strToDate(dateFrom)} onChange={(d) => setDateFrom(dateToStr(d))}
+                  dateFormat="MMM d, yyyy" className="filter-date-input" calendarClassName="mint-calendar"
+                  popperProps={{ strategy: 'fixed' }} />
               </div>
-              <div className="table-filter">
-                <label htmlFor="date-to-filter" className="filter-label">To</label>
-                <input id="date-to-filter" type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="filter-date-input" />
+              <div className="date-picker-wrap">
+                <DatePicker selected={strToDate(dateTo)} onChange={(d) => setDateTo(dateToStr(d))}
+                  dateFormat="MMM d, yyyy" className="filter-date-input" calendarClassName="mint-calendar"
+                  popperProps={{ strategy: 'fixed' }} />
               </div>
+              <div />
+              {/* row 2: buttons + labels */}
+              <button type="button" className="date-jump-btn" onClick={() => recordDateRange.min && setDateFrom(recordDateRange.min)} title="Jump to first record date">«</button>
+              <span className="date-filter-label">FROM</span>
+              <span className="date-filter-label">TO</span>
+              <button type="button" className="date-jump-btn" onClick={() => recordDateRange.max && setDateTo(recordDateRange.max)} title="Jump to last record date">»</button>
             </div>
           </div>
 
