@@ -14,8 +14,9 @@ To setup, just need to navigate to the public URL. You just need to keep providi
 
 
 ### ex.
+https://github.com/user-attachments/assets/31358819-f8aa-4dcf-950b-0d072ef7da5d
 
-https://github.com/user-attachments/assets/e74b602b-c879-4f2a-ba84-bc279eddbb9b
+
 
 
 
