@@ -1,6 +1,7 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
-import mintIcon from './assets/mint.svg'
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import './App.css'
+
+// ── Utilities ──────────────────────────────────────────────────────────────
 
 function parseAmount(str) {
   const n = parseFloat(String(str || '').replace(/[^0-9.-]/g, ''))
@@ -10,648 +11,658 @@ function parseAmount(str) {
 function normalizeDateValue(value) {
   const raw = String(value || '').trim()
   if (!raw) return null
-
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw
-
   const parsed = new Date(raw)
   if (Number.isNaN(parsed.getTime())) return null
-
-  const year = parsed.getFullYear()
-  const month = String(parsed.getMonth() + 1).padStart(2, '0')
-  const day = String(parsed.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
+  return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, '0')}-${String(parsed.getDate()).padStart(2, '0')}`
 }
 
-// Adjacent letter keys (top row QWERTY) for tag shortcuts when modal is open
+// Stable identity key for a record — used as recordTags map key
+function makeRecordId(record) {
+  return `${String(record.date || '').trim()}||${String(record.title || '').trim()}||${String(record.amount || '').trim()}`
+}
+
 const TAG_SHORTCUT_KEYS = 'qwertyuiop'
+const TAG_COLORS = ['#2d8a6e', '#e07b54', '#5b8dd9', '#d4a843', '#9b59b6', '#e74c6e', '#1abc9c', '#e67e22']
+
+// ── IndexedDB ──────────────────────────────────────────────────────────────
 
 const DB_NAME = 'mint-db'
 const DB_VERSION = 1
 const STORE_NAME = 'mint-store'
 const DATA_KEY = 'mint-data'
+const DIR_HANDLE_KEY = 'mint-dir-handle'
 
 function openDB() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION)
     req.onerror = () => reject(req.error)
     req.onsuccess = () => resolve(req.result)
-    req.onupgradeneeded = (e) => {
-      e.target.result.createObjectStore(STORE_NAME)
-    }
+    req.onupgradeneeded = (e) => e.target.result.createObjectStore(STORE_NAME)
   })
 }
 
-async function loadFromIndexedDB() {
+async function idbGet(key) {
   try {
     const db = await openDB()
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, 'readonly')
-      const req = tx.objectStore(STORE_NAME).get(DATA_KEY)
-      req.onsuccess = () => {
-        db.close()
-        const data = req.result
-        if (!data) {
-          resolve({ tags: [], records: [], recordTags: {} })
-          return
-        }
-        resolve({
-          tags: Array.isArray(data.tags) ? data.tags : [],
-          records: Array.isArray(data.records) ? data.records : [],
-          recordTags:
-            data.recordTags && typeof data.recordTags === 'object' && !Array.isArray(data.recordTags)
-              ? data.recordTags
-              : {},
-        })
-      }
-      req.onerror = () => {
-        db.close()
-        reject(req.error)
-      }
+    return new Promise((resolve) => {
+      const req = db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).get(key)
+      req.onsuccess = () => { db.close(); resolve(req.result ?? null) }
+      req.onerror = () => { db.close(); resolve(null) }
     })
-  } catch {
-    return { tags: [], records: [], recordTags: {} }
-  }
+  } catch { return null }
 }
 
-async function saveToIndexedDB(data) {
+async function idbPut(key, value) {
   try {
     const db = await openDB()
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       const tx = db.transaction(STORE_NAME, 'readwrite')
-      const req = tx.objectStore(STORE_NAME).put(data, DATA_KEY)
-      req.onsuccess = () => {
-        db.close()
-        resolve()
-      }
-      req.onerror = () => {
-        db.close()
-        reject(req.error)
-      }
+      tx.objectStore(STORE_NAME).put(value, key)
+      tx.oncomplete = () => { db.close(); resolve() }
+      tx.onerror = () => { db.close(); resolve() }
     })
-  } catch {
-    // ignore save errors
-  }
+  } catch {}
 }
+
+// ── Folder helpers ─────────────────────────────────────────────────────────
+
+async function scanFolderForCsvs(dirHandle) {
+  const entries = []
+  for await (const [name, entry] of dirHandle.entries()) {
+    if (entry.kind === 'file' && name.toLowerCase().endsWith('.csv')) {
+      entries.push({ name, handle: entry })
+    }
+  }
+  return entries.sort((a, b) => a.name.localeCompare(b.name))
+}
+
+async function readCsvFiles(csvEntries) {
+  const all = []
+  const seen = new Set()
+  for (const { name, handle } of csvEntries) {
+    try {
+      const file = await handle.getFile()
+      const text = await file.text()
+      for (const rec of parseCSV(text)) {
+        const id = makeRecordId(rec)
+        if (!seen.has(id) && parseAmount(rec.amount) >= 0) {
+          seen.add(id)
+          all.push({ ...rec, _id: id, _source: name })
+        }
+      }
+    } catch { /* skip unreadable file */ }
+  }
+  return all
+}
+
+async function loadMintDataFromFolder(dirHandle) {
+  try {
+    const fh = await dirHandle.getFileHandle('mint-data.json')
+    return JSON.parse(await (await fh.getFile()).text())
+  } catch { return null }
+}
+
+async function saveMintDataToFolder(dirHandle, data) {
+  try {
+    const fh = await dirHandle.getFileHandle('mint-data.json', { create: true })
+    const w = await fh.createWritable()
+    await w.write(JSON.stringify({ version: 2, lastModified: new Date().toISOString(), ...data }))
+    await w.close()
+  } catch {}
+}
+
+// ── CSV parsing / export ───────────────────────────────────────────────────
 
 function parseCSV(text) {
   const lines = text.trim().split(/\r?\n/)
   if (lines.length < 2) return []
   const parseRow = (line) => {
-    const values = []
-    let current = ''
-    let inQuotes = false
-    for (let i = 0; i < line.length; i++) {
-      const c = line[i]
-      if (c === '"') inQuotes = !inQuotes
-      else if (c === ',' && !inQuotes) {
-        values.push(current.trim())
-        current = ''
-      } else current += c
+    const vals = []
+    let cur = '', inQ = false
+    for (const c of line) {
+      if (c === '"') inQ = !inQ
+      else if (c === ',' && !inQ) { vals.push(cur.trim()); cur = '' }
+      else cur += c
     }
-    values.push(current.trim())
-    return values
+    vals.push(cur.trim())
+    return vals
   }
-  const headerRow = parseRow(lines[0]).map((h) => h.replace(/^"|"$/g, '').trim())
-  const dateIdx = headerRow.findIndex((h) => /date/i.test(h))
-  const titleIdx = headerRow.findIndex((h) => /title/i.test(h))
-  const amountIdx = headerRow.findIndex((h) => /amount/i.test(h))
-  const tagIdx = headerRow.findIndex((h) => /tag/i.test(h))
-  if (dateIdx === -1 || titleIdx === -1 || amountIdx === -1) return []
+  const hdr = parseRow(lines[0]).map((h) => h.replace(/^"|"$/g, '').trim())
+  const di = hdr.findIndex((h) => /date/i.test(h))
+  const ti = hdr.findIndex((h) => /title/i.test(h))
+  const ai = hdr.findIndex((h) => /amount/i.test(h))
+  if (di === -1 || ti === -1 || ai === -1) return []
   return lines.slice(1).map((line) => {
-    const values = parseRow(line)
-    return {
-      date: values[dateIdx] ?? '',
-      title: values[titleIdx] ?? '',
-      amount: values[amountIdx] ?? '',
-      tag: tagIdx !== -1 ? values[tagIdx] ?? '' : '',
-    }
+    const v = parseRow(line)
+    return { date: v[di] ?? '', title: v[ti] ?? '', amount: v[ai] ?? '' }
   })
 }
 
-function quoteCsvValue(value) {
-  const raw = String(value ?? '')
-  return `"${raw.replace(/"/g, '""')}"`
-}
-
-function downloadCsv(filename, text) {
-  const blob = new Blob([text], { type: 'text/csv;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = filename
-  document.body.appendChild(anchor)
-  anchor.click()
-  anchor.remove()
-  setTimeout(() => URL.revokeObjectURL(url), 1000)
-}
+// ── App ────────────────────────────────────────────────────────────────────
 
 function App() {
+  // Records are ephemeral — always re-read from CSVs in the chosen folder.
+  // Only tags and recordTags (keyed by makeRecordId) are persisted.
   const [records, setRecords] = useState([])
-  const [error, setError] = useState(null)
   const [tags, setTags] = useState([])
-  const [newTagName, setNewTagName] = useState('')
-  const [recordTags, setRecordTags] = useState({})
+  const [recordTags, setRecordTags] = useState({})   // { [recordId]: tagName }
+
+  // Folder state
+  const [dirHandle, setDirHandle] = useState(null)
+  const [reconnectHandle, setReconnectHandle] = useState(null) // handle awaiting user permission gesture
+
+  // UI state
+  const [isLoaded, setIsLoaded] = useState(false)
+  const [isScanning, setIsScanning] = useState(false)
+  const [csvCount, setCsvCount] = useState(0)
+  const [csvFiles, setCsvFiles] = useState([])
+  const [showFolderPopover, setShowFolderPopover] = useState(false)
+  const [error, setError] = useState(null)
+  const [dateParseWarning, setDateParseWarning] = useState(null)
+
+  // Tagging modal — modalRecords is a frozen snapshot of filteredRecords taken when the modal opens
   const [showTagModal, setShowTagModal] = useState(false)
   const [modalRecordIndex, setModalRecordIndex] = useState(0)
+  const [modalRecords, setModalRecords] = useState([])
+  const [newTagName, setNewTagName] = useState('')
+  // Filters & charts
   const [selectedTags, setSelectedTags] = useState([])
-  const [dateFrom, setDateFrom] = useState(new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]) // 90 DAYS BEFORE TODAY
+  const [dateFrom, setDateFrom] = useState(
+    new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+  )
   const [dateTo, setDateTo] = useState(new Date().toISOString().split('T')[0])
   const [chartMode, setChartMode] = useState('bar')
   const [calendarViewMonth, setCalendarViewMonth] = useState(null)
-  const [isLoaded, setIsLoaded] = useState(false)
-  const [clearConfirmStep, setClearConfirmStep] = useState(0)
-  const clearButtonRef = useRef(null)
+
+  const saveTimerRef = useRef(null)
+  const dirHandleRef = useRef(null)
+
+  useEffect(() => { dirHandleRef.current = dirHandle }, [dirHandle])
 
   useEffect(() => {
-    loadFromIndexedDB().then((data) => {
-      setTags(data.tags)
-      setRecords(data.records)
-      setRecordTags(data.recordTags)
+    if (!showFolderPopover) return
+    const close = (e) => { if (!e.target.closest('.folder-badge-wrap')) setShowFolderPopover(false) }
+    document.addEventListener('click', close)
+    return () => document.removeEventListener('click', close)
+  }, [showFolderPopover])
+
+  // ── Initial load ──────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    async function init() {
+      // Load cached meta (tags + recordTags) from IDB for fast startup
+      const cached = await idbGet(DATA_KEY)
+      const cachedTags = Array.isArray(cached?.tags) ? cached.tags : []
+      const cachedRecordTags = (cached?.recordTags && !Array.isArray(cached.recordTags)) ? cached.recordTags : {}
+      setTags(cachedTags)
+      setRecordTags(cachedRecordTags)
+
+      // Restore directory handle
+      const handle = await idbGet(DIR_HANDLE_KEY)
+      if (handle) {
+        // queryPermission doesn't require a user gesture; requestPermission might
+        const perm = await handle.queryPermission({ mode: 'readwrite' })
+        if (perm === 'granted') {
+          setDirHandle(handle)
+          dirHandleRef.current = handle
+          await doLoadFromFolder(handle, { tags: cachedTags, recordTags: cachedRecordTags }, true)
+        } else {
+          // Permission needs to be re-requested via user gesture — show reconnect screen
+          setReconnectHandle(handle)
+        }
+      }
+
       setIsLoaded(true)
-    })
+    }
+    init()
   }, [])
+
+  // ── Debounced save (tags + recordTags only — records come from CSVs) ──────
 
   useEffect(() => {
     if (!isLoaded) return
-    saveToIndexedDB({ tags, records, recordTags })
-  }, [isLoaded, tags, records, recordTags])
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+    saveTimerRef.current = setTimeout(() => {
+      const meta = { tags, recordTags }
+      idbPut(DATA_KEY, meta)
+      if (dirHandleRef.current) saveMintDataToFolder(dirHandleRef.current, meta)
+    }, 300)
+  }, [isLoaded, tags, recordTags])
 
-  useEffect(() => {
-    if (clearConfirmStep === 0) return
+  // ── Folder loading ─────────────────────────────────────────────────────────
 
-    const handleDocumentClick = (event) => {
-      const button = clearButtonRef.current
-      if (button && button.contains(event.target)) return
-      setClearConfirmStep(0)
-    }
-
-    document.addEventListener('click', handleDocumentClick)
-    return () => document.removeEventListener('click', handleDocumentClick)
-  }, [clearConfirmStep])
-
-  const handleFileChange = (e) => {
-    const file = e.target.files?.[0]
+  async function doLoadFromFolder(handle, existingMeta, openModal = false) {
+    setIsScanning(true)
     setError(null)
-    if (!file) return
-    if (!file.name.toLowerCase().endsWith('.csv')) {
-      setError('Please select a CSV file.')
-      return
-    }
-    const reader = new FileReader()
-    reader.onload = (event) => {
-      try {
-        const text = event.target?.result
-        if (typeof text !== 'string') {
-          setError('Could not read file.')
-          return
-        }
-        const parsed = parseCSV(text)
-        if (parsed.length === 0) {
-          setError('No valid records found. CSV must have Date, Title, and Amount columns.')
-          return
-        }
+    try {
+      const csvEntries = await scanFolderForCsvs(handle)
+      setCsvCount(csvEntries.length)
+      setCsvFiles(csvEntries.map((e) => e.name))
 
-        const nextTags = []
-        const nextRecordTags = {}
-        parsed.forEach((row, index) => {
-          const tag = row.tag?.trim()
-          if (tag && tag !== 'Untagged') {
-            nextRecordTags[index] = tag
-            if (!nextTags.includes(tag)) nextTags.push(tag)
-          }
-        })
+      if (csvEntries.length === 0) { setRecords([]); return }
 
-        setRecords(parsed)
-        setTags(nextTags)
-        setRecordTags(nextRecordTags)
-        setSelectedTags([...nextTags, 'Untagged'])
-        if (parsed.length > 0) {
-          setModalRecordIndex(0)
-          setShowTagModal(true)
-        }
-      } catch {
-        setError('Failed to parse CSV.')
+      const newRecords = await readCsvFiles(csvEntries)
+
+      const badDates = newRecords.filter((r) => !normalizeDateValue(r.date)).length
+      setDateParseWarning(badDates > 0 ? badDates : null)
+
+      // Folder's mint-data.json takes priority over IDB cache
+      const folderData = await loadMintDataFromFolder(handle)
+      const resolvedTags = Array.isArray(folderData?.tags) ? folderData.tags : (existingMeta?.tags ?? [])
+      const resolvedRecordTags = (folderData?.recordTags && !Array.isArray(folderData.recordTags))
+        ? folderData.recordTags : (existingMeta?.recordTags ?? {})
+
+      setRecords(newRecords)
+      setTags(resolvedTags)
+      setRecordTags(resolvedRecordTags)
+      setSelectedTags([...resolvedTags, 'Untagged'])
+
+      if (openModal && newRecords.length > 0) {
+        setModalRecordIndex(0)
+        setShowTagModal(true)
       }
+    } catch {
+      setError('Failed to read folder contents.')
+    } finally {
+      setIsScanning(false)
     }
-    reader.readAsText(file)
-    e.target.value = ''
   }
 
-  const generateExportCsv = () => {
-    const headers = ['Date', 'Title', 'Amount', 'Tag']
-    const rows = records.map((row, index) => {
-      const tag = recordTags[index] ?? 'Untagged'
-      return [row.date, row.title, row.amount, tag]
-    })
-    return [headers, ...rows]
-      .map((cells) => cells.map((cell) => quoteCsvValue(cell)).join(','))
-      .join('\r\n')
-  }
+  // ── Choose folder (initial or change) ─────────────────────────────────────
 
-  const exportCsv = () => {
-    const csvText = generateExportCsv()
-    downloadCsv('mint-export.csv', csvText)
-  }
-
-  const resetAppData = () => {
-    setRecords([])
-    setTags([])
-    setRecordTags({})
-    setSelectedTags([])
-    setNewTagName('')
-    setShowTagModal(false)
-    setModalRecordIndex(0)
-    setError(null)
-    setDateFrom(new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0])
-    setDateTo(new Date().toISOString().split('T')[0])
-    setCalendarViewMonth(null)
-    saveToIndexedDB({ tags: [], records: [], recordTags: {} })
-  }
-
-  const handleClearClick = () => {
-    if (clearConfirmStep < 2) {
-      setClearConfirmStep((step) => step + 1)
+  const handleChooseFolder = async () => {
+    if (!window.showDirectoryPicker) {
+      setError('Your browser does not support folder access. Use Chrome 86+ or Edge 86+.')
       return
     }
-    resetAppData()
-    setClearConfirmStep(0)
+    try {
+      const handle = await window.showDirectoryPicker({ mode: 'readwrite' })
+      setDirHandle(handle)
+      setReconnectHandle(null)
+      dirHandleRef.current = handle
+      await idbPut(DIR_HANDLE_KEY, handle)
+      await doLoadFromFolder(handle, { tags, recordTags }, true)
+    } catch (e) {
+      if (e?.name !== 'AbortError') setError('Could not access the selected folder.')
+    }
+  }
+
+  // ── Reconnect (needs user gesture to re-grant permission) ─────────────────
+
+  const handleReconnect = async () => {
+    if (!reconnectHandle) return
+    try {
+      const perm = await reconnectHandle.requestPermission({ mode: 'readwrite' })
+      if (perm === 'granted') {
+        setDirHandle(reconnectHandle)
+        dirHandleRef.current = reconnectHandle
+        setReconnectHandle(null)
+        await doLoadFromFolder(reconnectHandle, { tags, recordTags }, true)
+      } else {
+        setError('Permission denied. Try choosing the folder again.')
+      }
+    } catch {
+      setError('Could not reconnect to folder.')
+    }
+  }
+
+  // ── Refresh (re-scan folder for new/changed CSVs) ─────────────────────────
+
+  const handleRefresh = async () => {
+    if (!dirHandleRef.current) return
+    try {
+      const perm = await dirHandleRef.current.requestPermission({ mode: 'readwrite' })
+      if (perm !== 'granted') { setError('Permission denied.'); return }
+      await doLoadFromFolder(dirHandleRef.current, { tags, recordTags })
+    } catch {
+      setError('Could not refresh folder contents.')
+    }
+  }
+
+  // ── Tag operations (keyed by record._id, not array index) ─────────────────
+
+  const getRecordTag = (rec) => {
+    return rec ? (recordTags[rec._id] ?? null) : null
+  }
+
+  const hasRecordTag = (rec, tag) => rec ? recordTags[rec._id] === tag : false
+
+  const toggleRecordTag = (rec, tag) => {
+    if (!rec) return
+    setRecordTags((prev) => {
+      const n = { ...prev }
+      if (n[rec._id] === tag) delete n[rec._id]; else n[rec._id] = tag
+      return n
+    })
+  }
+
+  const setRecordTag = (rec, tag) => {
+    if (!rec) return
+    setRecordTags((prev) => {
+      const n = { ...prev }
+      if (tag == null) delete n[rec._id]; else n[rec._id] = tag
+      return n
+    })
   }
 
   const addTag = () => {
     const name = newTagName.trim()
     if (!name || tags.includes(name)) return
     setTags((t) => [...t, name])
+    setSelectedTags((prev) => [...prev, name])
     setNewTagName('')
   }
 
   const removeTag = (tag) => {
     setTags((t) => t.filter((x) => x !== tag))
     setRecordTags((prev) => {
-      const next = { ...prev }
-      for (const i of Object.keys(next)) {
-        if (next[i] === tag) delete next[i]
-      }
-      return next
+      const n = { ...prev }
+      for (const k of Object.keys(n)) { if (n[k] === tag) delete n[k] }
+      return n
     })
   }
 
-  const setRecordTag = (rowIndex, tag) => {
-    setRecordTags((prev) => {
-      const next = { ...prev }
-      if (!tag) {
-        delete next[rowIndex]
-        return next
-      }
-      next[rowIndex] = tag
-      return next
-    })
-  }
 
-  const toggleRecordTag = (rowIndex, tag) => {
-    setRecordTags((prev) => {
-      const next = { ...prev }
-      if (prev[rowIndex] === tag) {
-        delete next[rowIndex]
-      } else {
-        next[rowIndex] = tag
-      }
-      return next
-    })
-  }
-
-  const getRecordTag = (rowIndex) => recordTags[rowIndex] ?? null
-  const hasRecordTag = (rowIndex, tag) => recordTags[rowIndex] === tag
-
-  useEffect(() => {
-    if (!showTagModal) return
-    const onKey = (e) => {
-      const active = document.activeElement
-      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) {
-        return
-      }
-      if (e.key === 'Escape') {
-        setShowTagModal(false)
-        return
-      }
-      if (e.key === 'ArrowLeft') {
-        e.preventDefault()
-        setModalRecordIndex((i) => Math.max(0, i - 1))
-        return
-      }
-      if (e.key === 'ArrowRight') {
-        e.preventDefault()
-        setModalRecordIndex((i) => Math.min(records.length - 1, i + 1))
-        return
-      }
-      const key = e.key.toLowerCase()
-      if (TAG_SHORTCUT_KEYS.includes(key)) {
-        const tagIndex = TAG_SHORTCUT_KEYS.indexOf(key)
-        if (tagIndex < tags.length) {
-          e.preventDefault()
-          const tag = tags[tagIndex]
-          toggleRecordTag(modalRecordIndex, tag)
-        }
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [showTagModal, modalRecordIndex, tags, records.length])
-
-
-  const filteredRecords = useMemo(() => {
-    const fromValue = normalizeDateValue(dateFrom)
-    const toValue = normalizeDateValue(dateTo)
-
-    return records
-      .map((row, i) => ({ row, originalIndex: i }))
-      .filter(({ row, originalIndex }) => {
-        const tag = recordTags[originalIndex] ?? null
-        if (selectedTags.length > 0) {
-          const isUntaggedSelected = selectedTags.includes('Untagged')
-          const isTagSelected = tag && selectedTags.includes(tag)
-          if (!(isUntaggedSelected && tag == null || isTagSelected)) return false
-        }
-
-        if (!fromValue && !toValue) return true
-
-        const rowDate = normalizeDateValue(row.date)
-        if (!rowDate) return false
-        if (fromValue && rowDate < fromValue) return false
-        if (toValue && rowDate > toValue) return false
-        return true
-      })
-  }, [records, selectedTags, dateFrom, dateTo, recordTags])
-
-  const chartData = useMemo(() => {
-    const byTag = {}
-    tags.forEach((t) => { byTag[t] = 0 })
-    byTag['Untagged'] = 0
-
-    filteredRecords.forEach(({ row, originalIndex }) => {
-      const tag = recordTags[originalIndex] ?? 'Untagged'
-      const amt = parseAmount(row.amount)
-      byTag[tag] = (byTag[tag] ?? 0) + amt
-    })
-
-    const entries = [...tags.map((t) => [t, byTag[t] ?? 0]), ['Untagged', byTag['Untagged'] ?? 0]]
-      .sort((a, b) => b[1] - a[1])
-    return entries.map(([tag, sum]) => ({ tag, sum }))
-  }, [filteredRecords, recordTags, tags])
-
-  const maxChartValue = useMemo(
-    () => Math.max(1, ...chartData.map((d) => d.sum)),
-    [chartData]
-  )
-
-  const chartTotal = useMemo(
-    () => chartData.reduce((acc, d) => acc + d.sum, 0),
-    [chartData]
-  )
-
-  const pieSlices = useMemo(() => {
-    if (chartTotal <= 0) return []
-    let currentAngle = 0
-    const radius = 80
-    const center = 100
-
-    return chartData.map((item, index) => {
-      const sliceAngle = (item.sum / chartTotal) * Math.PI * 2
-      const startAngle = currentAngle
-      const endAngle = currentAngle + sliceAngle
-      const x1 = center + radius * Math.cos(startAngle)
-      const y1 = center + radius * Math.sin(startAngle)
-      const x2 = center + radius * Math.cos(endAngle)
-      const y2 = center + radius * Math.sin(endAngle)
-      const largeArcFlag = sliceAngle > Math.PI ? 1 : 0
-      const path = `M ${center} ${center} L ${x1} ${y1} A ${radius} ${radius} 0 ${largeArcFlag} 1 ${x2} ${y2} Z`
-      currentAngle = endAngle
-      return {
-        ...item,
-        path,
-        percentage: chartTotal ? (item.sum / chartTotal) * 100 : 0,
-        color: `hsl(${(index * 69) % 360}, 70%, 54%)`,
-      }
-    })
-  }, [chartData, chartTotal])
-
-  const calendarData = useMemo(() => {
-    const byDate = {}
-    filteredRecords.forEach(({ row, originalIndex }) => {
-      const date = normalizeDateValue(row.date)
-      if (!date) return
-      const tag = recordTags[originalIndex] ?? 'Untagged'
-      const amt = parseAmount(row.amount)
-      if (!byDate[date]) byDate[date] = {}
-      byDate[date][tag] = (byDate[date][tag] || 0) + amt
-    })
-    return byDate
-  }, [filteredRecords, recordTags])
-
-  const calendarMonthData = useMemo(() => {
-    if (!calendarViewMonth) return null
-
-    const [year, month] = calendarViewMonth.split('-').map(Number)
-    if (!year || !month) return null
-
-    const daysInMonth = new Date(year, month, 0).getDate()
-    const firstDayOfMonth = new Date(year, month - 1, 1).getDay() // 0 = Sunday
-
-    const calendarDays = []
-
-    // Add empty cells for days before the 1st
-    for (let i = 0; i < firstDayOfMonth; i++) {
-      calendarDays.push(null)
-    }
-
-    // Add days of the month
-    for (let day = 1; day <= daysInMonth; day++) {
-      const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
-      const sumByTag = calendarData[dateStr] || {}
-      calendarDays.push({ day, dateStr, sumByTag })
-    }
-
-    return { year, month, calendarDays }
-  }, [calendarData, calendarViewMonth])
-
-  const getTagShortcutKey = (tagIndex) =>
-    tagIndex < TAG_SHORTCUT_KEYS.length ? TAG_SHORTCUT_KEYS[tagIndex].toUpperCase() : null
+  // ── Derived state ──────────────────────────────────────────────────────────
 
   const sortedTags = [...tags].sort()
   const allTagOptions = [...sortedTags, 'Untagged']
 
   const tagColors = useMemo(
-    () =>
-      Object.fromEntries(
-        [...allTagOptions].map((tag, index) => [tag, `hsl(${(index * 69) % 360}, 70%, 54%)`])
-      ),
+    () => Object.fromEntries(allTagOptions.map((t, i) => [t, TAG_COLORS[i % TAG_COLORS.length]])),
     [allTagOptions]
   )
 
-  const calendarLegendTags = allTagOptions
+  const filteredRecords = useMemo(() => {
+    const from = normalizeDateValue(dateFrom)
+    const to = normalizeDateValue(dateTo)
+    return records
+      .map((row, i) => ({ row, originalIndex: i }))
+      .filter(({ row }) => {
+        const tag = recordTags[row._id] ?? null
+        if (selectedTags.length > 0) {
+          const untaggedSel = selectedTags.includes('Untagged')
+          if (!(untaggedSel && tag == null || (tag && selectedTags.includes(tag)))) return false
+        }
+        if (!from && !to) return true
+        const d = normalizeDateValue(row.date)
+        if (!d) return false
+        if (from && d < from) return false
+        if (to && d > to) return false
+        return true
+      })
+      .sort((a, b) => {
+        const da = normalizeDateValue(a.row.date) ?? ''
+        const db = normalizeDateValue(b.row.date) ?? ''
+        return db < da ? -1 : db > da ? 1 : 0
+      })
+  }, [records, selectedTags, dateFrom, dateTo, recordTags])
 
-  const toggleTag = (tag) => {
-    setSelectedTags((prev) =>
-      prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]
-    )
-  }
+  // ── Keyboard handler (modal) ───────────────────────────────────────────────
 
-  const handleSelectAll = (checked) => {
-    setSelectedTags(checked ? allTagOptions : [])
-  }
+  useEffect(() => {
+    if (!showTagModal) return
+    const onKey = (e) => {
+      const active = document.activeElement
+      if (active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA') return
+      if (e.key === 'Escape') { setShowTagModal(false); return }
+      if (e.key === 'ArrowLeft') { e.preventDefault(); setModalRecordIndex((i) => Math.max(0, i - 1)); return }
+      if (e.key === 'ArrowRight') { e.preventDefault(); setModalRecordIndex((i) => Math.min(modalRecords.length - 1, i + 1)); return }
+      const key = e.key.toLowerCase()
+      if (TAG_SHORTCUT_KEYS.includes(key)) {
+        const tagIndex = TAG_SHORTCUT_KEYS.indexOf(key)
+        if (tagIndex < tags.length) { e.preventDefault(); toggleRecordTag(modalRecords[modalRecordIndex]?.row, tags[tagIndex]) }
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [showTagModal, modalRecordIndex, tags, modalRecords])
+
+
+  const chartData = useMemo(() => {
+    const by = {}
+    tags.forEach((t) => { by[t] = 0 })
+    by['Untagged'] = 0
+    filteredRecords.forEach(({ row }) => {
+      const t = recordTags[row._id] ?? 'Untagged'
+      by[t] = (by[t] ?? 0) + parseAmount(row.amount)
+    })
+    return [...tags.map((t) => [t, by[t] ?? 0]), ['Untagged', by['Untagged'] ?? 0]]
+      .sort((a, b) => b[1] - a[1])
+      .map(([tag, sum]) => ({ tag, sum }))
+  }, [filteredRecords, recordTags, tags])
+
+  const maxChartValue = useMemo(() => Math.max(1, ...chartData.map((d) => d.sum)), [chartData])
+  const chartTotal = useMemo(() => chartData.reduce((a, d) => a + d.sum, 0), [chartData])
+
+  const pieSlices = useMemo(() => {
+    if (chartTotal <= 0) return []
+    let a = 0
+    return chartData.map((item, i) => {
+      const s = (item.sum / chartTotal) * Math.PI * 2
+      const x1 = 100 + 80 * Math.cos(a), y1 = 100 + 80 * Math.sin(a)
+      a += s
+      const x2 = 100 + 80 * Math.cos(a), y2 = 100 + 80 * Math.sin(a)
+      return {
+        ...item,
+        path: `M 100 100 L ${x1} ${y1} A 80 80 0 ${s > Math.PI ? 1 : 0} 1 ${x2} ${y2} Z`,
+        percentage: (item.sum / chartTotal) * 100,
+        color: tagColors[item.tag] ?? TAG_COLORS[i % TAG_COLORS.length],
+      }
+    })
+  }, [chartData, chartTotal, tagColors])
+
+  const calendarData = useMemo(() => {
+    const by = {}
+    filteredRecords.forEach(({ row }) => {
+      const d = normalizeDateValue(row.date)
+      if (!d) return
+      const tag = recordTags[row._id] ?? 'Untagged'
+      if (!by[d]) by[d] = {}
+      by[d][tag] = (by[d][tag] || 0) + parseAmount(row.amount)
+    })
+    return by
+  }, [filteredRecords, recordTags])
+
+  const calendarMonthData = useMemo(() => {
+    let vm = calendarViewMonth
+    if (vm && filteredRecords.length > 0) {
+      const has = filteredRecords.some(({ row }) => { const d = normalizeDateValue(row.date); return d && d.slice(0, 7) === vm })
+      if (!has) { const f = filteredRecords.map(({ row }) => normalizeDateValue(row.date)).filter(Boolean).sort()[0]; if (f) vm = f.slice(0, 7) }
+    }
+    if (!vm) return null
+    const [year, month] = vm.split('-').map(Number)
+    if (!year || !month) return null
+    const dim = new Date(year, month, 0).getDate()
+    const fd = new Date(year, month - 1, 1).getDay()
+    const days = []
+    for (let i = 0; i < fd; i++) days.push(null)
+    for (let d = 1; d <= dim; d++) {
+      const ds = `${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+      days.push({ day: d, dateStr: ds, sumByTag: calendarData[ds] || {} })
+    }
+    return { year, month, calendarDays: days }
+  }, [calendarData, calendarViewMonth, filteredRecords])
 
   useEffect(() => {
     if (calendarViewMonth !== null) return
-
-    const firstDate = records
-      .map((row) => normalizeDateValue(row.date))
-      .filter(Boolean)
-      .sort()[0]
-
-    if (firstDate) {
-      setCalendarViewMonth(firstDate.slice(0, 7))
-    }
+    const first = records.map((r) => normalizeDateValue(r.date)).filter(Boolean).sort()[0]
+    if (first) setCalendarViewMonth(first.slice(0, 7))
   }, [records, calendarViewMonth])
 
-  const changeCalendarMonth = (delta) => {
-    setCalendarViewMonth((current) => {
-      const [year, month] = current ? current.split('-').map(Number) : [new Date().getFullYear(), new Date().getMonth() + 1]
-      const next = new Date(year, month - 1, 1)
-      next.setMonth(next.getMonth() + delta)
-      return `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, '0')}`
+  const recordMonths = useMemo(() => {
+    const months = records.map((r) => normalizeDateValue(r.date)?.slice(0, 7)).filter(Boolean)
+    if (!months.length) return { min: null, max: null }
+    months.sort()
+    return { min: months[0], max: months[months.length - 1] }
+  }, [records])
+
+  const changeCalendarMonth = (delta) =>
+    setCalendarViewMonth((cur) => {
+      const [y, m] = cur ? cur.split('-').map(Number) : [new Date().getFullYear(), new Date().getMonth() + 1]
+      const n = new Date(y, m - 1 + delta, 1)
+      const next = `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}`
+      if (recordMonths.min && next < recordMonths.min) return cur
+      if (recordMonths.max && next > recordMonths.max) return cur
+      return next
     })
+
+  const toggleTag = (tag) =>
+    setSelectedTags((prev) => prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag])
+
+  const handleSelectAll = (checked) => setSelectedTags(checked ? allTagOptions : [])
+
+  const getTagShortcutKey = (i) => i < TAG_SHORTCUT_KEYS.length ? TAG_SHORTCUT_KEYS[i].toUpperCase() : null
+
+  // Progress
+  const totalCount = records.length
+
+  // ── Render: pre-folder screens ─────────────────────────────────────────────
+
+  if (!isLoaded) {
+    return (
+      <div className="app app--centered">
+        <h1 className="splash-title">🌿 mint</h1>
+        <p className="loading-text">Loading…</p>
+      </div>
+    )
   }
+
+  // Folder in IDB but permission needs re-granting (requires user gesture)
+  if (reconnectHandle && !dirHandle) {
+    return (
+      <div className="app app--centered">
+        <header className="app-header"><h1>🌿 mint</h1></header>
+        {error && <p className="error">{error}</p>}
+        <div className="onboard-card">
+          <div className="onboard-icon">🔒</div>
+          <h2 className="onboard-title">Reconnect to folder</h2>
+          <p className="onboard-desc">
+            Mint needs your permission to access <strong>{reconnectHandle.name}</strong> again.
+          </p>
+          <button type="button" className="onboard-btn" onClick={handleReconnect}>
+            Grant access
+          </button>
+          <button type="button" className="onboard-alt-btn" onClick={() => { setReconnectHandle(null) }}>
+            Choose a different folder
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // No folder chosen yet — onboarding
+  if (!dirHandle) {
+    return (
+      <div className="app app--centered">
+        <header className="app-header"><h1>🌿 mint</h1></header>
+        {error && <p className="error">{error}</p>}
+        <div className="onboard-card">
+          <div className="onboard-icon">📂</div>
+          <h2 className="onboard-title">Choose your data folder</h2>
+          <p className="onboard-desc">
+            Mint reads all CSV files from a folder on your device and keeps your tags synced there automatically. Nothing leaves your machine.
+          </p>
+          <button type="button" className="onboard-btn" onClick={handleChooseFolder}>
+            Choose Folder
+          </button>
+          {!window.showDirectoryPicker && (
+            <p className="onboard-compat">Requires Chrome 86+ or Edge 86+</p>
+          )}
+          <ul className="onboard-hints">
+            <li>Drop bank CSV exports into one folder</li>
+            <li>Mint reads all CSVs and deduplicates records</li>
+            <li>Tags sync back to the same folder as <code>mint-data.json</code></li>
+          </ul>
+        </div>
+      </div>
+    )
+  }
+
+  // Scanning
+  if (isScanning) {
+    return (
+      <div className="app app--centered">
+        <header className="app-header"><h1>🌿 mint</h1></header>
+        <p className="loading-text">Reading folder…</p>
+      </div>
+    )
+  }
+
+  // ── Render: main app ───────────────────────────────────────────────────────
 
   return (
     <div className="app">
+      {/* Tag Modal */}
       {showTagModal && (
-        <div
-          className="modal-backdrop"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="tag-modal-title"
-          onClick={(e) => e.target === e.currentTarget && setShowTagModal(false)}
-        >
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="tag-modal-title"
+          onClick={(e) => e.target === e.currentTarget && setShowTagModal(false)}>
           <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
-            <h2 id="tag-modal-title" className="modal-title">
-              Tags
-            </h2>
+            <h2 id="tag-modal-title" className="modal-title">Tags</h2>
+
             <div className="modal-tags-manage">
               <div className="modal-tags-input-row">
-                <input
-                  type="text"
-                  value={newTagName}
-                  onChange={(e) => setNewTagName(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && addTag()}
-                  placeholder="New tag name"
-                  className="tag-input modal-tag-input"
-                  aria-label="New tag name"
-                />
-                <button type="button" onClick={addTag} className="tag-add-btn">
-                  Add
-                </button>
+                <input type="text" value={newTagName} onChange={(e) => setNewTagName(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && addTag()} placeholder="New tag name"
+                  className="tag-input modal-tag-input" aria-label="New tag name" />
+                <button type="button" onClick={addTag} className="tag-add-btn">Add</button>
               </div>
               {tags.length > 0 && (
                 <ul className="modal-tags-list">
                   {tags.map((tag) => (
                     <li key={tag} className="tag-chip">
                       <span className="tag-chip-label">{tag}</span>
-                      <button
-                        type="button"
-                        onClick={() => removeTag(tag)}
-                        className="tag-chip-remove"
-                        aria-label={`Remove ${tag}`}
-                      >
-                        ×
-                      </button>
+                      <button type="button" onClick={() => removeTag(tag)} className="tag-chip-remove" aria-label={`Remove ${tag}`}>×</button>
                     </li>
                   ))}
                 </ul>
               )}
             </div>
+
             <p className="modal-desc">
-              {records.length > 0
-                ? 'Go through each record and optionally apply tags. You can change tags later.'
-                : 'Load a CSV file to tag records.'}
+              {modalRecords.length > 0 ? 'Go through each record and optionally apply tags. You can change tags later.' : 'No records match the current filters.'}
             </p>
+
             <div className="modal-record-view">
               <div className="modal-nav-row">
-                <button
-                  type="button"
-                  onClick={() => setModalRecordIndex((i) => Math.max(0, i - 1))}
-                  disabled={modalRecordIndex === 0 || records.length === 0}
-                  className="modal-nav-btn"
-                  aria-label="Previous record"
-                >
-                  ←
-                </button>
-                <span className="modal-record-counter">
-                  Record {records.length > 0 ? modalRecordIndex + 1 : 0} of {records.length}
-                </span>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setModalRecordIndex((i) =>
-                      Math.min(Math.max(0, records.length - 1), i + 1)
-                    )
-                  }
-                  disabled={
-                    modalRecordIndex >= records.length - 1 || records.length === 0
-                  }
-                  className="modal-nav-btn"
-                  aria-label="Next record"
-                >
-                  →
-                </button>
+                <button type="button" onClick={() => setModalRecordIndex((i) => Math.max(0, i - 1))}
+                  disabled={modalRecordIndex === 0 || modalRecords.length === 0} className="modal-nav-btn" aria-label="Previous record">←</button>
+                <span className="modal-record-counter">Record {modalRecords.length > 0 ? modalRecordIndex + 1 : 0} of {modalRecords.length}</span>
+                <button type="button" onClick={() => setModalRecordIndex((i) => Math.min(Math.max(0, modalRecords.length - 1), i + 1))}
+                  disabled={modalRecordIndex >= modalRecords.length - 1 || modalRecords.length === 0} className="modal-nav-btn" aria-label="Next record">→</button>
               </div>
-              {records[modalRecordIndex] && (
+
+              {modalRecords[modalRecordIndex]?.row && (
                 <>
                   <div className="modal-record-summary-block">
-                    <span className="modal-record-label">Date</span>
-                    <span className="modal-record-value">
-                      {records[modalRecordIndex].date}
-                    </span>
-                    <span className="modal-record-label">Title</span>
-                    <span className="modal-record-value">
-                      {records[modalRecordIndex].title}
-                    </span>
-                    <span className="modal-record-label">Amount</span>
-                    <span className="modal-record-value">
-                      {records[modalRecordIndex].amount}
-                    </span>
+                    <span className="modal-record-label">DATE</span>
+                    <span className="modal-record-value">{modalRecords[modalRecordIndex].row.date}</span>
+                    <span className="modal-record-label">TITLE</span>
+                    <span className="modal-record-value">{modalRecords[modalRecordIndex].row.title}</span>
+                    <span className="modal-record-label">AMOUNT</span>
+                    <span className="modal-record-value">{modalRecords[modalRecordIndex].row.amount}</span>
                   </div>
+
                   <div className="modal-record-tags">
-                    <span className="modal-tags-label">Tag (press key to assign, same key to clear)</span>
+                    <span className="modal-tags-label">TAG (PRESS KEY TO ASSIGN, SAME KEY TO CLEAR)</span>
                     <div className="modal-tag-checks" role="radiogroup" aria-label="Tag">
                       {tags.map((tag, tagIndex) => {
                         const shortcut = getTagShortcutKey(tagIndex)
                         return (
                           <label key={tag} className="modal-tag-check">
-                            <input
-                              type="radio"
-                              name={`record-tag-${modalRecordIndex}`}
-                              checked={hasRecordTag(modalRecordIndex, tag)}
-                              onChange={() =>
-                                toggleRecordTag(modalRecordIndex, tag)
-                              }
-                              className="tag-radio"
-                            />
+                            <input type="radio" name={`record-tag-${modalRecordIndex}`}
+                              checked={hasRecordTag(modalRecords[modalRecordIndex]?.row, tag)}
+                              onChange={() => toggleRecordTag(modalRecords[modalRecordIndex]?.row, tag)} className="tag-radio" />
                             <span>{tag}</span>
-                            {shortcut && (
-                              <kbd className="modal-tag-kbd" aria-label={`Shortcut: ${shortcut}`}>
-                                {shortcut}
-                              </kbd>
-                            )}
+                            {shortcut && <kbd className="modal-tag-kbd" aria-label={`Shortcut: ${shortcut}`}>{shortcut}</kbd>}
                           </label>
                         )
                       })}
-                      <label key="_none" className="modal-tag-check">
-                        <input
-                          type="radio"
-                          name={`record-tag-${modalRecordIndex}`}
-                          checked={!getRecordTag(modalRecordIndex)}
-                          onChange={() => setRecordTag(modalRecordIndex, null)}
-                          className="tag-radio"
-                        />
+                      <label className="modal-tag-check">
+                        <input type="radio" name={`record-tag-${modalRecordIndex}`}
+                          checked={!getRecordTag(modalRecords[modalRecordIndex]?.row)}
+                          onChange={() => setRecordTag(modalRecords[modalRecordIndex]?.row, null)} className="tag-radio" />
                         <span>None</span>
                       </label>
                     </div>
@@ -659,285 +670,205 @@ function App() {
                 </>
               )}
             </div>
+
             <div className="modal-actions">
-              <button
-                type="button"
-                onClick={() => setShowTagModal(false)}
-                className="modal-done-btn"
-              >
-                Done
-              </button>
+              <button type="button" onClick={() => setShowTagModal(false)} className="modal-done-btn">Done</button>
             </div>
           </div>
         </div>
       )}
+
+      {/* Header */}
       <header className="app-header">
-        <h1> 🙓 mint </h1>
-        <div className="header-actions">
-          <button
-            type="button"
-            className="save-btn"
-            onClick={exportCsv}
-            disabled={records.length === 0}
-          >
-            Save
+        <h1>🌿 mint</h1>
+        <div className="folder-badge-wrap">
+          <button type="button" className="folder-badge" onClick={() => setShowFolderPopover((v) => !v)} title="Show loaded files">
+            <span className="folder-badge-icon">📂</span>
+            <span className="folder-badge-name">{dirHandle?.name}</span>
           </button>
-          <button
-            type="button"
-            ref={clearButtonRef}
-            className={`reset-btn ${clearConfirmStep > 0 ? 'active' : ''} ${clearConfirmStep > 1 ? 'ready' : ''}`}
-            onClick={handleClearClick}
-            disabled={!isLoaded}
-          >
-            Clear{clearConfirmStep > 1 ? '🔥 ' : ''}
-          </button>
+          <button type="button" className="refresh-btn" onClick={handleRefresh} title="Re-scan folder for CSV changes">↺</button>
+          {showFolderPopover && (
+            <div className="folder-popover">
+              <div className="folder-popover-title">{csvFiles.length} CSV file{csvFiles.length !== 1 ? 's' : ''} loaded</div>
+              <ul className="folder-popover-list">
+                {csvFiles.map((f) => <li key={f} className="folder-popover-item">{f}</li>)}
+              </ul>
+            </div>
+          )}
         </div>
       </header>
-      <div className="upload-section">
-        <label className="file-label">
-          <input
-            type="file"
-            accept=".csv"
-            onChange={handleFileChange}
-            className="file-input"
-          />
-          Add CSV File
-        </label>
-        <p className="hint">CSV must include columns: Date, Title, Amount and optional Tag for saved app exports</p>
-      </div>
 
       {error && <p className="error">{error}</p>}
-      {records.length > 0 && (
-        <div className="table-actions">
-          <div className="table-filter">
-            <span className="filter-label">Filter by tag</span>
-            <div className="filter-checkboxes">
-              <label className="filter-checkbox">
-                <input
-                  type="checkbox"
-                  checked={selectedTags.length === allTagOptions.length}
-                  onChange={(e) => handleSelectAll(e.target.checked)}
-                />
-                All
-              </label>
-              {sortedTags.map((tag) => (
-                <label key={tag} className="filter-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={selectedTags.includes(tag)}
-                    onChange={() => toggleTag(tag)}
-                  />
-                  {tag}
-                </label>
-              ))}
-              <label className="filter-checkbox">
-                <input
-                  type="checkbox"
-                  checked={selectedTags.includes('Untagged')}
-                  onChange={() => toggleTag('Untagged')}
-                />
-                Untagged
-              </label>
-            </div>
-          </div>
-          <div className="date-filters-row">
-            <div className="table-filter">
-              <label htmlFor="date-from-filter" className="filter-label">
-                Date from
-              </label>
-              <input
-                id="date-from-filter"
-                type="date"
-                value={dateFrom}
-                onChange={(e) => setDateFrom(e.target.value)}
-                className="filter-date-input"
-              />
-            </div>
-            <div className="table-filter">
-              <label htmlFor="date-to-filter" className="filter-label">
-                Date to
-              </label>
-              <input
-                id="date-to-filter"
-                type="date"
-                value={dateTo}
-                onChange={(e) => setDateTo(e.target.value)}
-                className="filter-date-input"
-              />
-            </div>
-          </div>
+
+      {dateParseWarning && (
+        <div className="date-warning">
+          <span>{dateParseWarning} record{dateParseWarning > 1 ? 's' : ''} had unreadable dates and will be excluded from date filters.</span>
+          <button type="button" className="date-warning-dismiss" onClick={() => setDateParseWarning(null)}>✕</button>
         </div>
       )}
+
+      {/* No CSV files in folder */}
+      {csvCount === 0 && (
+        <div className="empty-state empty-state--main">
+          <div className="empty-state-icon">📄</div>
+          <p className="empty-state-title">No CSV files in this folder</p>
+          <p className="empty-state-sub">Add CSV files to <strong>{dirHandle?.name}</strong>, then click ↺ to refresh.</p>
+          <button type="button" className="onboard-alt-btn" onClick={handleChooseFolder} style={{ marginTop: '0.75rem' }}>
+            Change folder
+          </button>
+        </div>
+      )}
+
+
       {records.length > 0 && (
         <>
-          <div className="table-wrap">
+          <div className="table-actions">
+            <div className="table-filter">
+              <span className="filter-label">Tags</span>
+              <div className="filter-checkboxes">
+                <label className="filter-checkbox">
+                  <input type="checkbox" checked={selectedTags.length === allTagOptions.length} onChange={(e) => handleSelectAll(e.target.checked)} />
+                  All
+                </label>
+                {sortedTags.map((tag) => (
+                  <label key={tag} className="filter-checkbox">
+                    <input type="checkbox" checked={selectedTags.includes(tag)} onChange={() => toggleTag(tag)} />
+                    {tag}
+                  </label>
+                ))}
+                <label className="filter-checkbox">
+                  <input type="checkbox" checked={selectedTags.includes('Untagged')} onChange={() => toggleTag('Untagged')} />
+                  Untagged
+                </label>
+              </div>
+            </div>
+            <div className="date-filters-row">
+              <div className="table-filter">
+                <label htmlFor="date-from-filter" className="filter-label">From</label>
+                <input id="date-from-filter" type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="filter-date-input" />
+              </div>
+              <div className="table-filter">
+                <label htmlFor="date-to-filter" className="filter-label">To</label>
+                <input id="date-to-filter" type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="filter-date-input" />
+              </div>
+            </div>
+          </div>
+
+          {filteredRecords.length === 0 && (
+            <div className="empty-state">
+              <p className="empty-state-text">No transactions match these filters.</p>
+              <button type="button" className="empty-state-link" onClick={() => handleSelectAll(true)}>Clear filters</button>
+            </div>
+          )}
+
+          {filteredRecords.length > 0 && (<div className="table-wrap">
             <table className="records-table">
               <thead>
-                <tr>
-                  <th>Date</th>
-                  <th>Title</th>
-                  <th>Amount</th>
-                  <th>Tag</th>
-                </tr>
+                <tr><th>Date</th><th>Title</th><th>Amount</th><th>Tag</th></tr>
               </thead>
               <tbody>
-                {filteredRecords.map(({ row, originalIndex }) => (
-                  <tr
-                    key={originalIndex}
-                    onClick={() => {
-                      setModalRecordIndex(originalIndex)
-                      setShowTagModal(true)
-                    }}
-                    className="table-row-clickable"
-                  >
-                    <td>{row.date}</td>
-                    <td>{row.title}</td>
-                    <td>{row.amount}</td>
-                    <td className="tag-cell tag-cell-readonly">
-                      {getRecordTag(originalIndex) ?? '—'}
-                    </td>
-                  </tr>
-                ))}
+                {filteredRecords.map(({ row, originalIndex }, filteredIndex) => {
+                  const rowTag = getRecordTag(row)
+                  return (
+                    <tr key={originalIndex} className="table-row-clickable"
+                      onClick={() => { setModalRecords([...filteredRecords]); setModalRecordIndex(filteredIndex); setShowTagModal(true) }}>
+                      <td className="td-date">{row.date}</td>
+                      <td className="td-title">{row.title}</td>
+                      <td className={`td-amount ${parseAmount(row.amount) >= 0 ? 'amount--positive' : 'amount--negative'}`}>{row.amount}</td>
+                      <td className="tag-cell">
+                        {rowTag
+                          ? <span className="tag-pill" style={{ '--tag-color': tagColors[rowTag] }}>{rowTag}</span>
+                          : <span className="tag-pill tag-pill--empty">—</span>}
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
-          </div>
-          <div className={`chart-section ${chartMode === 'calendar' ? 'chart-section--calendar' : ''}`}>
-            <div className="chart-tabs" role="tablist" aria-label="Chart view">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={chartMode === 'bar'}
-                aria-label="Bar chart"
-                className={`chart-tab ${chartMode === 'bar' ? 'active' : ''}`}
-                onClick={() => setChartMode('bar')}
-              >
-                <span className="chart-tab-icon" aria-hidden="true"> ▯ </span>
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={chartMode === 'pie'}
-                aria-label="Pie chart"
-                className={`chart-tab ${chartMode === 'pie' ? 'active' : ''}`}
-                onClick={() => setChartMode('pie')}
-              >
-                <span className="chart-tab-icon" aria-hidden="true">⊗</span>
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={chartMode === 'calendar'}
-                aria-label="Calendar view"
-                className={`chart-tab ${chartMode === 'calendar' ? 'active' : ''}`}
-                onClick={() => setChartMode('calendar')}
-              >
-                <span className="chart-tab-icon" aria-hidden="true">🗓</span>
-              </button>
+          </div>)}
+
+          <div className={`chart-section${chartMode === 'calendar' ? ' chart-section--calendar' : ''}`}>
+            <div className="chart-tabs" role="tablist">
+              {[['bar', '▯'], ['pie', '⊗'], ['calendar', '🗓']].map(([mode, icon]) => (
+                <button key={mode} role="tab" aria-selected={chartMode === mode}
+                  className={`chart-tab${chartMode === mode ? ' active' : ''}`} onClick={() => setChartMode(mode)}>
+                  <span className="chart-tab-icon">{icon}</span>
+                </button>
+              ))}
             </div>
 
-            {chartMode === 'bar' ? (
+            {chartMode === 'bar' && (
               <div className="chart-bars">
                 {chartData.map(({ tag, sum }) => (
                   <div key={tag} className="chart-bar-wrap">
                     <div className="chart-bar-container">
-                      <div
-                        className="chart-bar"
-                        style={{
-                          height: `${(sum / maxChartValue) * 100}%`,
-                        }}
-                        title={`${tag}: ${sum.toFixed(2)}`}
-                      />
+                      <div className="chart-bar" style={{ height: `${(sum / maxChartValue) * 100}%`, backgroundColor: tagColors[tag] || '#2d8a6e' }} title={`${tag}: ${sum.toFixed(2)}`} />
                     </div>
                     <span className="chart-bar-label">{tag}</span>
                     <span className="chart-bar-value">{sum.toFixed(2)}</span>
                   </div>
                 ))}
               </div>
-            ) : chartMode === 'pie' ? (
+            )}
+
+            {chartMode === 'pie' && (
               <div className="pie-chart-section">
-                {chartTotal <= 0 ? (
-                  <p>No data to display in pie chart.</p>
-                ) : (
+                {chartTotal <= 0 ? <p className="chart-empty">No data to display.</p> : (
                   <div className="pie-chart-wrap">
                     <svg viewBox="0 0 200 200" width="200" height="200" className="pie-chart">
                       {pieSlices.map(({ tag, path, color }) => (
-                        <path key={tag} d={path} fill={color} stroke="#fff" strokeWidth="1" />
+                        <path key={tag} d={path} fill={color} stroke="#1a1a1a" strokeWidth="1.5" />
                       ))}
-                      <circle cx="100" cy="100" r="40" fill="#fff" />
+                      <circle cx="100" cy="100" r="40" fill="#1a1a1a" />
                     </svg>
                     <div className="pie-legend">
                       {pieSlices.map(({ tag, percentage, color }) => (
                         <div key={tag} className="pie-legend-item">
                           <span className="pie-legend-color" style={{ backgroundColor: color }} />
-                          <span>
-                            {tag}: {percentage.toFixed(1)}%
-                          </span>
+                          <span>{tag}: {percentage.toFixed(1)}%</span>
                         </div>
                       ))}
                     </div>
                   </div>
                 )}
               </div>
-            ) : (
+            )}
+
+            {chartMode === 'calendar' && (
               <div className="calendar-section">
-                {!calendarMonthData ? (
-                  <p>No data to display in calendar view.</p>
-                ) : (
+                {!calendarMonthData ? <p className="chart-empty">No data to display.</p> : (
                   <div className="calendar-container">
                     <div className="calendar-nav-row">
-                      <button
-                        type="button"
-                        onClick={() => changeCalendarMonth(-1)}
-                        className="calendar-nav-btn"
-                        aria-label="Previous month"
-                      >
-                        ←
-                      </button>
+                      <button onClick={() => changeCalendarMonth(-1)} className="calendar-nav-btn"
+                        disabled={calendarViewMonth === recordMonths.min}>←</button>
                       <h4 className="calendar-month">
                         {new Date(calendarMonthData.year, calendarMonthData.month - 1).toLocaleDateString('en-US', { year: 'numeric', month: 'long' })}
                       </h4>
-                      <button
-                        type="button"
-                        onClick={() => changeCalendarMonth(1)}
-                        className="calendar-nav-btn"
-                        aria-label="Next month"
-                      >
-                        →
-                      </button>
+                      <button onClick={() => changeCalendarMonth(1)} className="calendar-nav-btn"
+                        disabled={calendarViewMonth === recordMonths.max}>→</button>
                     </div>
                     <div className="calendar-content">
                       <div className="calendar-grid">
-                        {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(day => (
-                          <div key={day} className="calendar-header">{day}</div>
+                        {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => (
+                          <div key={d} className="calendar-header">{d}</div>
                         ))}
-                        {calendarMonthData.calendarDays.map((dayData, index) => (
-                          <div key={index} className={`calendar-day ${!dayData ? 'empty' : ''}`}>
-                            {dayData ? (
+                        {calendarMonthData.calendarDays.map((day, i) => (
+                          <div key={i} className={`calendar-day${!day ? ' empty' : ''}`}>
+                            {day && (
                               <>
-                                <div className="calendar-day-number">{dayData.day}</div>
-                                {Object.entries(dayData.sumByTag).map(([tag, sum]) =>
-                                  sum ? (
-                                    <div
-                                      key={tag}
-                                      className="calendar-day-tag"
-                                      style={{ color: tagColors[tag] || 'inherit' }}
-                                    >
-                                      {sum.toFixed(2)}
-                                    </div>
-                                  ) : null
+                                <div className="calendar-day-number">{day.day}</div>
+                                {Object.entries(day.sumByTag).map(([tag, sum]) =>
+                                  sum ? <div key={tag} className="calendar-day-tag" style={{ color: tagColors[tag] || 'inherit' }}>{sum.toFixed(2)}</div> : null
                                 )}
                               </>
-                            ) : null}
+                            )}
                           </div>
                         ))}
                       </div>
                       <div className="calendar-legend">
-                        {calendarLegendTags.map((tag) => (
+                        {allTagOptions.map((tag) => (
                           <div key={tag} className="calendar-legend-item">
-                            <span
-                              className="calendar-legend-color"
-                              style={{ backgroundColor: tagColors[tag] }}
-                            />
+                            <span className="calendar-legend-color" style={{ backgroundColor: tagColors[tag] }} />
                             <span>{tag}</span>
                           </div>
                         ))}
@@ -948,6 +879,7 @@ function App() {
               </div>
             )}
           </div>
+
         </>
       )}
     </div>
