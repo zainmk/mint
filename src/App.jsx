@@ -60,6 +60,7 @@ const DB_NAME = 'mint-db'
 const DB_VERSION = 1
 const STORE_NAME = 'mint-store'
 const DATA_KEY = 'mint-data'
+const SETTINGS_KEY = 'mint-settings'
 const DIR_HANDLE_KEY = 'mint-dir-handle'
 
 function openDB() {
@@ -229,6 +230,11 @@ function App() {
       setTags(cachedTags)
       setRecordTags(cachedRecordTags)
 
+      // Restore saved date range
+      const settings = await idbGet(SETTINGS_KEY)
+      if (settings?.dateFrom) setDateFrom(settings.dateFrom)
+      if (settings?.dateTo) setDateTo(settings.dateTo)
+
       // Restore directory handle
       const handle = await idbGet(DIR_HANDLE_KEY)
       if (handle) {
@@ -237,7 +243,7 @@ function App() {
         if (perm === 'granted') {
           setDirHandle(handle)
           dirHandleRef.current = handle
-          await doLoadFromFolder(handle, { tags: cachedTags, recordTags: cachedRecordTags }, true)
+          await doLoadFromFolder(handle, { tags: cachedTags, recordTags: cachedRecordTags })
         } else {
           // Permission needs to be re-requested via user gesture — show reconnect screen
           setReconnectHandle(handle)
@@ -261,9 +267,14 @@ function App() {
     }, 300)
   }, [isLoaded, tags, recordTags])
 
+  useEffect(() => {
+    if (!isLoaded) return
+    idbPut(SETTINGS_KEY, { dateFrom, dateTo })
+  }, [isLoaded, dateFrom, dateTo])
+
   // ── Folder loading ─────────────────────────────────────────────────────────
 
-  async function doLoadFromFolder(handle, existingMeta, openModal = false) {
+  async function doLoadFromFolder(handle, existingMeta) {
     setIsScanning(true)
     setError(null)
     try {
@@ -289,10 +300,7 @@ function App() {
       setRecordTags(resolvedRecordTags)
       setSelectedTags([...resolvedTags, 'tagless'])
 
-      if (openModal && newRecords.length > 0) {
-        setModalRecordIndex(0)
-        setShowTagModal(true)
-      }
+
     } catch {
       setError('Failed to read folder contents.')
     } finally {
@@ -313,7 +321,7 @@ function App() {
       setReconnectHandle(null)
       dirHandleRef.current = handle
       await idbPut(DIR_HANDLE_KEY, handle)
-      await doLoadFromFolder(handle, { tags, recordTags }, true)
+      await doLoadFromFolder(handle, { tags, recordTags })
     } catch (e) {
       if (e?.name !== 'AbortError') setError('Could not access the selected folder.')
     }
@@ -329,7 +337,7 @@ function App() {
         setDirHandle(reconnectHandle)
         dirHandleRef.current = reconnectHandle
         setReconnectHandle(null)
-        await doLoadFromFolder(reconnectHandle, { tags, recordTags }, true)
+        await doLoadFromFolder(reconnectHandle, { tags, recordTags })
       } else {
         setError('Permission denied. Try choosing the folder again.')
       }
