@@ -234,6 +234,7 @@ function App() {
       const settings = await idbGet(SETTINGS_KEY)
       if (settings?.dateFrom) setDateFrom(settings.dateFrom)
       if (settings?.dateTo) setDateTo(settings.dateTo)
+      if (settings?.chartMode) setChartMode(settings.chartMode)
 
       // Restore directory handle
       const handle = await idbGet(DIR_HANDLE_KEY)
@@ -269,8 +270,8 @@ function App() {
 
   useEffect(() => {
     if (!isLoaded) return
-    idbPut(SETTINGS_KEY, { dateFrom, dateTo })
-  }, [isLoaded, dateFrom, dateTo])
+    idbPut(SETTINGS_KEY, { dateFrom, dateTo, chartMode })
+  }, [isLoaded, dateFrom, dateTo, chartMode])
 
   // ── Folder loading ─────────────────────────────────────────────────────────
 
@@ -517,6 +518,28 @@ function App() {
       by[d][tag] = (by[d][tag] || 0) + parseAmount(row.amount)
     })
     return by
+  }, [filteredRecords, recordTags])
+
+  const trendData = useMemo(() => {
+    const byMonthTag = {}
+    filteredRecords.forEach(({ row }) => {
+      const d = normalizeDateValue(row.date)
+      if (!d) return
+      const mo = d.slice(0, 7)
+      const tag = recordTags[row._id] ?? 'tagless'
+      if (!byMonthTag[mo]) byMonthTag[mo] = {}
+      byMonthTag[mo][tag] = (byMonthTag[mo][tag] || 0) + parseAmount(row.amount)
+    })
+    const recorded = Object.keys(byMonthTag).sort()
+    if (!recorded.length) return { months: [], byMonthTag }
+    const months = []
+    let [y, m] = recorded[0].split('-').map(Number)
+    const [ey, em] = recorded[recorded.length - 1].split('-').map(Number)
+    while (y < ey || (y === ey && m <= em)) {
+      months.push(`${y}-${String(m).padStart(2, '0')}`)
+      m++; if (m > 12) { m = 1; y++ }
+    }
+    return { months, byMonthTag }
   }, [filteredRecords, recordTags])
 
   const calendarMonthData = useMemo(() => {
@@ -882,9 +905,9 @@ function App() {
             </table>
           </div>)}
 
-          <div className={`chart-section${chartMode === 'calendar' ? ' chart-section--calendar' : ''}`}>
+          <div className={`chart-section${chartMode === 'calendar' ? ' chart-section--calendar' : ''}${chartMode === 'trend' ? ' chart-section--trend' : ''}`}>
             <div className="chart-tabs" role="tablist">
-              {[['bar', '▯'], ['pie', '⊗'], ['calendar', '🗓']].map(([mode, icon]) => (
+              {[['bar', '▯'], ['pie', '⊗'], ['calendar', '🗓'], ['trend', '↗']].map(([mode, icon]) => (
                 <button key={mode} role="tab" aria-selected={chartMode === mode}
                   className={`chart-tab${chartMode === mode ? ' active' : ''}`} onClick={() => setChartMode(mode)}>
                   <span className="chart-tab-icon">{icon}</span>
@@ -928,6 +951,67 @@ function App() {
                 )}
               </div>
             )}
+
+            {chartMode === 'trend' && (() => {
+              const { months, byMonthTag } = trendData
+              if (months.length < 2) return <p className="chart-empty">Need at least 2 months of data.</p>
+              const ML = 58, MR = 24, MT = 20, MB = 44, W = 620, H = 270
+              const cW = W - ML - MR, cH = H - MT - MB
+              let maxVal = 0
+              allTagOptions.forEach(tag => months.forEach(mo => {
+                const v = byMonthTag[mo]?.[tag] || 0
+                if (v > maxVal) maxVal = v
+              }))
+              if (maxVal === 0) return <p className="chart-empty">No data to display.</p>
+              const xPos = (i) => ML + (i / (months.length - 1)) * cW
+              const yPos = (v) => MT + cH - (v / maxVal) * cH
+              const yTicks = [0, 0.25, 0.5, 0.75, 1].map(r => maxVal * r)
+              const xInterval = Math.max(1, Math.ceil(months.length / 8))
+              const activeTags = allTagOptions.filter(tag => months.some(mo => (byMonthTag[mo]?.[tag] || 0) > 0))
+              return (
+                <div className="trend-chart-section">
+                  <svg viewBox={`0 0 ${W} ${H}`} className="trend-chart">
+                    {yTicks.map((v, i) => (
+                      <g key={i}>
+                        <line x1={ML} y1={yPos(v)} x2={W - MR} y2={yPos(v)} stroke="#222" strokeWidth="1" />
+                        <text x={ML - 6} y={yPos(v) + 4} textAnchor="end" fill="#555" fontSize="10">${v >= 1000 ? `${(v / 1000).toFixed(1)}k` : v.toFixed(0)}</text>
+                      </g>
+                    ))}
+                    {months.map((mo, i) => {
+                      if (i % xInterval !== 0 && i !== months.length - 1) return null
+                      const [yr, mn] = mo.split('-').map(Number)
+                      const label = new Date(yr, mn - 1).toLocaleDateString('en-US', { month: 'short', year: '2-digit' })
+                      return <text key={mo} x={xPos(i)} y={H - MB + 16} textAnchor="middle" fill="#555" fontSize="10">{label}</text>
+                    })}
+                    <line x1={ML} y1={MT} x2={ML} y2={MT + cH} stroke="#333" strokeWidth="1" />
+                    <line x1={ML} y1={MT + cH} x2={W - MR} y2={MT + cH} stroke="#333" strokeWidth="1" />
+                    {activeTags.map(tag => {
+                      const color = tagColors[tag] || '#2d8a6e'
+                      const pts = months.map((mo, i) => `${xPos(i)},${yPos(byMonthTag[mo]?.[tag] || 0)}`).join(' ')
+                      return (
+                        <g key={tag}>
+                          <polyline points={pts} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+                          {months.map((mo, i) => {
+                            const v = byMonthTag[mo]?.[tag] || 0
+                            return <circle key={mo} cx={xPos(i)} cy={yPos(v)} r="3.5" fill={color}>
+                              <title>{tag} · {new Date(...mo.split('-').map((n, j) => j === 1 ? +n - 1 : +n)).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}: ${v.toFixed(2)}</title>
+                            </circle>
+                          })}
+                        </g>
+                      )
+                    })}
+                  </svg>
+                  <div className="trend-legend">
+                    {activeTags.map(tag => (
+                      <div key={tag} className="trend-legend-item">
+                        <span className="trend-legend-dot" style={{ backgroundColor: tagColors[tag] }} />
+                        <span>{tag}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )
+            })()}
 
             {chartMode === 'calendar' && (
               <div className="calendar-section">
