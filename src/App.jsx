@@ -16,6 +16,13 @@ function dateToStr(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 }
 
+function formatDisplayDate(str) {
+  if (!str) return ''
+  const [y, m, d] = str.split('-').map(Number)
+  if (!y || !m || !d) return str
+  return new Date(y, m - 1, d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+}
+
 function parseAmount(str) {
   const n = parseFloat(String(str || '').replace(/[^0-9.-]/g, ''))
   return Number.isFinite(n) ? n : 0
@@ -145,8 +152,9 @@ async function saveMintDataToFolder(dirHandle, data) {
 // ── CSV parsing / export ───────────────────────────────────────────────────
 
 function parseCSV(text) {
-  const lines = text.trim().split(/\r?\n/)
+  const lines = text.trim().split(/\r?\n/).filter((l) => l.trim())
   if (lines.length < 2) return []
+
   const parseRow = (line) => {
     const vals = []
     let cur = '', inQ = false
@@ -158,15 +166,27 @@ function parseCSV(text) {
     vals.push(cur.trim())
     return vals
   }
-  const hdr = parseRow(lines[0]).map((h) => h.replace(/^"|"$/g, '').trim())
+
+  const clean = (s) => String(s ?? '').replace(/^["'\s]+|["'\s]+$/g, '').trim()
+
+  const hdr = parseRow(lines[0]).map(clean)
   const di = hdr.findIndex((h) => /date/i.test(h))
   const ti = hdr.findIndex((h) => /title|description/i.test(h))
   const ai = hdr.findIndex((h) => /amount/i.test(h))
   if (di === -1 || ti === -1 || ai === -1) return []
-  return lines.slice(1).map((line) => {
-    const v = parseRow(line)
-    return { date: v[di] ?? '', title: v[ti] ?? '', amount: v[ai] ?? '' }
-  })
+
+  const results = []
+  for (const line of lines.slice(1)) {
+    const v = parseRow(line).map(clean)
+    const rawAmount = v[ai] ?? ''
+    // Skip rows with blank or non-numeric amounts (e.g. "", "-", "N/A")
+    if (!rawAmount || !/\d/.test(rawAmount)) continue
+    const rawDate = v[di] ?? ''
+    // Normalize date to YYYY-MM-DD regardless of source format
+    const date = normalizeDateValue(rawDate) ?? rawDate
+    results.push({ date, title: v[ti] ?? '', amount: rawAmount })
+  }
+  return results
 }
 
 // ── App ────────────────────────────────────────────────────────────────────
@@ -745,7 +765,7 @@ function App() {
                 <>
                   <div className="modal-record-summary-block">
                     <span className="modal-record-label">DATE</span>
-                    <span className="modal-record-value">{modalRecords[modalRecordIndex].row.date}</span>
+                    <span className="modal-record-value">{formatDisplayDate(modalRecords[modalRecordIndex].row.date)}</span>
                     <span className="modal-record-label">TITLE</span>
                     <span className="modal-record-value">{modalRecords[modalRecordIndex].row.title}</span>
                     <span className="modal-record-label">AMOUNT</span>
@@ -890,7 +910,7 @@ function App() {
                   return (
                     <tr key={originalIndex} className="table-row-clickable"
                       onClick={() => { setModalRecords([...filteredRecords]); setModalRecordIndex(filteredIndex); setShowTagModal(true) }}>
-                      <td className="td-date">{row.date}</td>
+                      <td className="td-date">{formatDisplayDate(row.date)}</td>
                       <td className="td-title">{row.title}</td>
                       <td className={`td-amount ${parseAmount(row.amount) >= 0 ? 'amount--positive' : 'amount--negative'}`}>{row.amount}</td>
                       <td className="tag-cell">
