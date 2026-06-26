@@ -35,7 +35,23 @@ function makeRecordId(record) {
   return `${String(record.date || '').trim()}||${String(record.title || '').trim()}||${String(record.amount || '').trim()}`
 }
 
-const TAG_SHORTCUT_KEYS = 'qwertyuiop'
+function computeTagHotkeys(tags) {
+  const used = new Set()
+  const map = {} // tagName → letter
+  for (const tag of tags) {
+    let assigned = null
+    for (const ch of tag.toLowerCase()) {
+      if (/[a-z]/.test(ch) && !used.has(ch)) { assigned = ch; break }
+    }
+    if (!assigned) {
+      for (const ch of 'abcdefghijklmnopqrstuvwxyz') {
+        if (!used.has(ch)) { assigned = ch; break }
+      }
+    }
+    if (assigned) { map[tag] = assigned; used.add(assigned) }
+  }
+  return map
+}
 const TAG_COLORS = ['#2d8a6e', '#e07b54', '#5b8dd9', '#d4a843', '#9b59b6', '#e74c6e', '#1abc9c', '#e67e22']
 
 // ── IndexedDB ──────────────────────────────────────────────────────────────
@@ -399,6 +415,8 @@ function App() {
   const sortedTags = [...tags].sort()
   const allTagOptions = [...sortedTags, 'tagless']
 
+  const tagHotkeys = useMemo(() => computeTagHotkeys(tags), [tags])
+
   const tagColors = useMemo(
     () => Object.fromEntries(allTagOptions.map((t, i) => [t, TAG_COLORS[i % TAG_COLORS.length]])),
     [allTagOptions]
@@ -440,14 +458,12 @@ function App() {
       if (e.key === 'ArrowLeft') { e.preventDefault(); setModalRecordIndex((i) => Math.max(0, i - 1)); return }
       if (e.key === 'ArrowRight') { e.preventDefault(); setModalRecordIndex((i) => Math.min(modalRecords.length - 1, i + 1)); return }
       const key = e.key.toLowerCase()
-      if (TAG_SHORTCUT_KEYS.includes(key)) {
-        const tagIndex = TAG_SHORTCUT_KEYS.indexOf(key)
-        if (tagIndex < tags.length) { e.preventDefault(); toggleRecordTag(modalRecords[modalRecordIndex]?.row, tags[tagIndex]) }
-      }
+      const matchedTag = Object.entries(tagHotkeys).find(([, k]) => k === key)?.[0]
+      if (matchedTag) { e.preventDefault(); toggleRecordTag(modalRecords[modalRecordIndex]?.row, matchedTag) }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [showTagModal, modalRecordIndex, tags, modalRecords])
+  }, [showTagModal, modalRecordIndex, tags, tagHotkeys, modalRecords])
 
 
   const chartData = useMemo(() => {
@@ -550,7 +566,7 @@ function App() {
 
   const handleSelectAll = (checked) => setSelectedTags(checked ? allTagOptions : [])
 
-  const getTagShortcutKey = (i) => i < TAG_SHORTCUT_KEYS.length ? TAG_SHORTCUT_KEYS[i].toUpperCase() : null
+  const getTagShortcutKey = (tag) => tagHotkeys[tag]?.toUpperCase() ?? null
 
   // ── Render: pre-folder screens ─────────────────────────────────────────────
 
@@ -709,7 +725,7 @@ function App() {
                     <span className="modal-tags-label">TAG (PRESS KEY TO ASSIGN, SAME KEY TO CLEAR)</span>
                     <div className="modal-tag-checks" role="radiogroup" aria-label="Tag">
                       {tags.map((tag, tagIndex) => {
-                        const shortcut = getTagShortcutKey(tagIndex)
+                        const shortcut = getTagShortcutKey(tag)
                         return (
                           <label key={tag} className="modal-tag-check">
                             <input type="radio" name={`record-tag-${modalRecordIndex}`}
