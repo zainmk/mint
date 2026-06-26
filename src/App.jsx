@@ -977,17 +977,15 @@ function App() {
               if (months.length < 2) return <p className="chart-empty">Need at least 2 months of data.</p>
               const ML = 58, MR = 24, MT = 20, MB = 44, W = 620, H = 270
               const cW = W - ML - MR, cH = H - MT - MB
-              let maxVal = 0
-              allTagOptions.forEach(tag => months.forEach(mo => {
-                const v = byMonthTag[mo]?.[tag] || 0
-                if (v > maxVal) maxVal = v
-              }))
+              const monthTotals = months.map(mo => Object.values(byMonthTag[mo] || {}).reduce((a, b) => a + b, 0))
+              let maxVal = Math.max(...monthTotals, 0)
               if (maxVal === 0) return <p className="chart-empty">No data to display.</p>
               const xPos = (i) => ML + (i / (months.length - 1)) * cW
               const yPos = (v) => MT + cH - (v / maxVal) * cH
               const yTicks = [0, 0.25, 0.5, 0.75, 1].map(r => maxVal * r)
               const xInterval = Math.max(1, Math.ceil(months.length / 8))
               const activeTags = allTagOptions.filter(tag => months.some(mo => (byMonthTag[mo]?.[tag] || 0) > 0))
+              const fmtMo = (mo) => { const [yr, mn] = mo.split('-').map(Number); return new Date(yr, mn - 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) }
               return (
                 <div className="trend-chart-section">
                   <svg viewBox={`0 0 ${W} ${H}`} className="trend-chart">
@@ -1014,12 +1012,24 @@ function App() {
                           {months.map((mo, i) => {
                             const v = byMonthTag[mo]?.[tag] || 0
                             return <circle key={mo} cx={xPos(i)} cy={yPos(v)} r="3.5" fill={color}>
-                              <title>{tag} · {new Date(...mo.split('-').map((n, j) => j === 1 ? +n - 1 : +n)).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}: ${v.toFixed(2)}</title>
+                              <title>{tag} · {fmtMo(mo)}: ${v.toFixed(2)}</title>
                             </circle>
                           })}
                         </g>
                       )
                     })}
+                    {/* total line — drawn on top */}
+                    <g>
+                      <polyline
+                        points={months.map((mo, i) => `${xPos(i)},${yPos(monthTotals[i])}`).join(' ')}
+                        fill="none" stroke="rgba(255,255,255,0.7)" strokeWidth="1.5"
+                        strokeDasharray="4 3" strokeLinejoin="round" strokeLinecap="round" />
+                      {months.map((mo, i) => (
+                        <circle key={mo} cx={xPos(i)} cy={yPos(monthTotals[i])} r="3" fill="white" fillOpacity="0.8">
+                          <title>total · {fmtMo(mo)}: ${monthTotals[i].toFixed(2)}</title>
+                        </circle>
+                      ))}
+                    </g>
                   </svg>
                   <div className="trend-legend">
                     {activeTags.map(tag => (
@@ -1028,6 +1038,10 @@ function App() {
                         <span>{tag}</span>
                       </div>
                     ))}
+                    <div className="trend-legend-item">
+                      <span className="trend-legend-dot trend-legend-dot--total" />
+                      <span>total</span>
+                    </div>
                   </div>
                 </div>
               )
