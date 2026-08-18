@@ -37,6 +37,14 @@ function normalizeDateValue(value) {
   return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, '0')}-${String(parsed.getDate()).padStart(2, '0')}`
 }
 
+// Collapse a statement descriptor down to a merchant key: statements append
+// store ids, dates and reference numbers that differ per charge.
+function normalizeTitle(title) {
+  const raw = String(title || '').trim()
+  const key = raw.toLowerCase().replace(/[^a-z\s]+/g, ' ').replace(/\s+/g, ' ').trim()
+  return key || raw.toLowerCase()
+}
+
 // Stable identity key for a record — used as recordTags map key
 function makeRecordId(record) {
   return `${String(record.date || '').trim()}||${String(record.title || '').trim()}||${String(record.amount || '').trim()}`
@@ -219,6 +227,7 @@ function App() {
   const [renamingTag, setRenamingTag] = useState(null) // { old, draft }
   // Filters & charts
   const [selectedTags, setSelectedTags] = useState([])
+  const [searchText, setSearchText] = useState('')
   const [dateFrom, setDateFrom] = useState(
     new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
   )
@@ -454,10 +463,17 @@ function App() {
   const filteredRecords = useMemo(() => {
     const from = normalizeDateValue(dateFrom)
     const to = normalizeDateValue(dateTo)
+    const query = searchText.trim().toLowerCase()
     return records
       .map((row, i) => ({ row, originalIndex: i }))
       .filter(({ row }) => {
         const tag = recordTags[row._id] ?? null
+        if (query) {
+          // Search across title, amount, tag, and both raw + displayed date
+          const haystack = [row.title, row.amount, tag, row.date, formatDisplayDate(row.date)]
+            .filter(Boolean).join(' ').toLowerCase()
+          if (!haystack.includes(query)) return false
+        }
         if (selectedTags.length > 0) {
           const untaggedSel = selectedTags.includes('tagless')
           if (!(untaggedSel && tag == null || (tag && selectedTags.includes(tag)))) return false
@@ -474,7 +490,7 @@ function App() {
         const db = normalizeDateValue(b.row.date) ?? ''
         return db < da ? -1 : db > da ? 1 : 0
       })
-  }, [records, selectedTags, dateFrom, dateTo, recordTags])
+  }, [records, selectedTags, dateFrom, dateTo, recordTags, searchText])
 
   // ── Keyboard handler (modal) ───────────────────────────────────────────────
 
@@ -561,6 +577,64 @@ function App() {
     }
     return { months, byMonthTag }
   }, [filteredRecords, recordTags])
+
+  // Numeric breakdown: biggest one-offs, repeating charges, merchant frequency
+  const insightsData = useMemo(() => {
+    const rows = filteredRecords.map(({ row }) => ({
+      row,
+      amount: parseAmount(row.amount),
+      month: normalizeDateValue(row.date)?.slice(0, 7) ?? null,
+      key: normalizeTitle(row.title),
+    }))
+
+    const topRecords = [...rows].sort((a, b) => b.amount - a.amount).slice(0, 5)
+
+    const groups = new Map()
+    for (const r of rows) {
+      let g = groups.get(r.key)
+      if (!g) { g = { key: r.key, amounts: [], months: new Set(), titles: {}, total: 0, count: 0 }; groups.set(r.key, g) }
+      g.amounts.push(r.amount)
+      g.total += r.amount
+      g.count += 1
+      if (r.month) g.months.add(r.month)
+      const t = String(r.row.title || '').trim()
+      if (t) g.titles[t] = (g.titles[t] || 0) + 1
+    }
+
+    const grandTotal = rows.reduce((a, r) => a + r.amount, 0)
+
+    const all = [...groups.values()].map((g) => {
+      // Most frequent original descriptor wins; shortest breaks ties
+      const label = Object.entries(g.titles)
+        .sort((a, b) => b[1] - a[1] || a[0].length - b[0].length)[0]?.[0] ?? g.key
+      return {
+        key: g.key,
+        label,
+        count: g.count,
+        total: g.total,
+        avg: g.total / g.count,
+        monthCount: g.months.size,
+        share: grandTotal > 0 ? (g.total / grandTotal) * 100 : 0,
+      }
+    })
+
+    const merchants = [...all].sort((a, b) => b.total - a.total).slice(0, 5)
+
+    // Repeat charges, most-often first
+    const byFrequency = all
+      .filter((g) => g.count >= 2)
+      .sort((a, b) => b.count - a.count || b.total - a.total)
+      .slice(0, 10)
+
+    return {
+      topRecords,
+      merchants,
+      byFrequency,
+      repeatCount: all.filter((g) => g.count >= 2).length,
+      merchantCount: all.length,
+      grandTotal,
+    }
+  }, [filteredRecords])
 
   const calendarMonthData = useMemo(() => {
     let vm = calendarViewMonth
@@ -870,6 +944,20 @@ function App() {
                 </label>
               </div>
             </div>
+            <div className="table-search">
+              <span className="search-icon" aria-hidden="true">🔍</span>
+              <input
+                type="text"
+                className="search-input"
+                value={searchText}
+                onChange={(e) => setSearchText(e.target.value)}
+                onKeyDown={(e) => e.key === 'Escape' && setSearchText('')}
+                aria-label="Search"
+              />
+              {searchText && (
+                <button type="button" className="search-clear-btn" onClick={() => setSearchText('')} aria-label="Clear search">×</button>
+              )}
+            </div>
             <div className="date-filters-row">
               {/* row 1: pickers */}
               <div />
@@ -895,7 +983,7 @@ function App() {
           {filteredRecords.length === 0 && (
             <div className="empty-state">
               <p className="empty-state-text">No transactions match these filters.</p>
-              <button type="button" className="empty-state-link" onClick={() => handleSelectAll(true)}>Clear filters</button>
+              <button type="button" className="empty-state-link" onClick={() => { handleSelectAll(true); setSearchText('') }}>Clear filters</button>
             </div>
           )}
 
@@ -927,7 +1015,7 @@ function App() {
 
           <div className={`chart-section${chartMode === 'calendar' ? ' chart-section--calendar' : ''}${chartMode === 'trend' ? ' chart-section--trend' : ''}`}>
             <div className="chart-tabs" role="tablist">
-              {[['bar', '▯'], ['pie', '⊗'], ['calendar', '🗓'], ['trend', '↗']].map(([mode, icon]) => (
+              {[['bar', '▯'], ['pie', '⊗'], ['calendar', '🗓'], ['trend', '↗'], ['insights', '#']].map(([mode, icon]) => (
                 <button key={mode} role="tab" aria-selected={chartMode === mode}
                   className={`chart-tab${chartMode === mode ? ' active' : ''}`} onClick={() => setChartMode(mode)}>
                   <span className="chart-tab-icon">{icon}</span>
@@ -936,17 +1024,23 @@ function App() {
             </div>
 
             {chartMode === 'bar' && (
-              <div className="chart-bars">
-                {chartData.map(({ tag, sum }) => (
-                  <div key={tag} className="chart-bar-wrap">
-                    <div className="chart-bar-container">
-                      <div className="chart-bar" style={{ height: `${(sum / maxChartValue) * 100}%`, backgroundColor: tagColors[tag] || '#2d8a6e' }} title={`${tag}: ${sum.toFixed(2)}`} />
+              <>
+                <div className="chart-bars">
+                  {chartData.map(({ tag, sum }) => (
+                    <div key={tag} className="chart-bar-wrap">
+                      <div className="chart-bar-container">
+                        <div className="chart-bar" style={{ height: `${(sum / maxChartValue) * 100}%`, backgroundColor: tagColors[tag] || '#2d8a6e' }} title={`${tag}: ${sum.toFixed(2)}`} />
+                      </div>
+                      <span className="chart-bar-label">{tag}</span>
+                      <span className="chart-bar-value">{sum.toFixed(2)}</span>
                     </div>
-                    <span className="chart-bar-label">{tag}</span>
-                    <span className="chart-bar-value">{sum.toFixed(2)}</span>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+                <div className="chart-total">
+                  <span className="chart-total-label">Total</span>
+                  <span className="chart-total-value">{chartTotal.toFixed(2)}</span>
+                </div>
+              </>
             )}
 
             {chartMode === 'pie' && (
@@ -1046,6 +1140,84 @@ function App() {
                 </div>
               )
             })()}
+
+            {chartMode === 'insights' && (
+              <div className="insights-section">
+                {filteredRecords.length === 0 ? <p className="chart-empty">No data to display.</p> : (
+                  <>
+                    <div className="insight-panel">
+                      <div className="insight-head">
+                        <h4 className="insight-title">By Top Transactions</h4>
+                        <span className="insight-sub">top {insightsData.topRecords.length} of {filteredRecords.length}</span>
+                      </div>
+                      <div className="insight-cards">
+                        {insightsData.topRecords.map(({ row, amount }) => {
+                          const t = recordTags[row._id]
+                          return (
+                            <div key={row._id} className="insight-card">
+                              <span className="insight-card-value">{amount.toFixed(2)}</span>
+                              <span className="insight-card-name" title={row.title}>{row.title}</span>
+                              <span className="insight-card-meta">{formatDisplayDate(row.date)}</span>
+                              {t
+                                ? <span className="tag-pill insight-card-tag" style={{ '--tag-color': tagColors[t] }}>{t}</span>
+                                : <span className="insight-card-tag insight-card-tag--empty">—</span>}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="insight-panel">
+                      <div className="insight-head">
+                        <h4 className="insight-title">By Frequency</h4>
+                        <span className="insight-sub">{insightsData.repeatCount} repeat{insightsData.repeatCount === 1 ? '' : 's'}</span>
+                      </div>
+                      {insightsData.byFrequency.length === 0 ? (
+                        <p className="insight-empty">Nothing charged more than once in this range.</p>
+                      ) : (
+                        <table className="insight-table">
+                          <thead>
+                            <tr>
+                              <th>Charge</th>
+                              <th className="insight-th-num"># of times</th>
+                              <th className="insight-th-num">Average</th>
+                              <th className="insight-th-num">Total</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {insightsData.byFrequency.map((g) => (
+                              <tr key={g.key}>
+                                <td className="insight-td-title" title={g.label}>{g.label}</td>
+                                <td className="insight-td-num insight-td-muted">{g.count}</td>
+                                <td className="insight-td-num insight-td-muted">{g.avg.toFixed(2)}</td>
+                                <td className="insight-td-num insight-td-strong">{g.total.toFixed(2)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
+                    </div>
+
+                    <div className="insight-panel">
+                      <div className="insight-head">
+                        <h4 className="insight-title">By Merchant</h4>
+                        <span className="insight-sub">top {insightsData.merchants.length} of {insightsData.merchantCount}</span>
+                      </div>
+                      <div className="insight-cards">
+                        {insightsData.merchants.map((g) => (
+                          <div key={g.key} className="insight-card">
+                            <span className="insight-card-value">{g.total.toFixed(2)}</span>
+                            <span className="insight-card-name" title={g.label}>{g.label}</span>
+                            <span className="insight-card-meta">{g.count}× · avg {g.avg.toFixed(2)}</span>
+                            <span className="insight-card-meta insight-card-meta--dim">{g.share.toFixed(1)}% of total</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
 
             {chartMode === 'calendar' && (
               <div className="calendar-section">
