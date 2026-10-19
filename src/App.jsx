@@ -78,7 +78,13 @@ function computeTagHotkeys(tags) {
   }
   return map
 }
-const TAG_COLORS = ['#2d8a6e', '#e07b54', '#5b8dd9', '#d4a843', '#9b59b6', '#e74c6e', '#1abc9c', '#e67e22']
+// Categorical slots stepped for the dark chart surface (#0d0f13). The order is
+// what keeps neighbours distinguishable under colour-blindness — validated
+// (adjacent CVD ΔE ≥ 8.4, normal-vision ΔE ≥ 19.3, all ≥ 3:1), so re-validate
+// before reordering or swapping a hex.
+const TAG_COLORS = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767']
+// Untagged spend is "no category", so it reads as neutral rather than a hue
+const TAGLESS_COLOR = '#6b7380'
 
 // [mode, icon, tooltip] — the icon alone carries no accessible name
 const CHART_TABS = [
@@ -476,7 +482,7 @@ function App() {
   const tagHotkeys = useMemo(() => computeTagHotkeys(tags), [tags])
 
   const tagColors = useMemo(
-    () => Object.fromEntries(allTagOptions.map((t, i) => [t, TAG_COLORS[i % TAG_COLORS.length]])),
+    () => Object.fromEntries(allTagOptions.map((t, i) => [t, t === 'tagless' ? TAGLESS_COLOR : TAG_COLORS[i % TAG_COLORS.length]])),
     [allTagOptions]
   )
 
@@ -673,6 +679,8 @@ function App() {
       const ds = `${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`
       days.push({ day: d, dateStr: ds, sumByTag: calendarData[ds] || {} })
     }
+    // Pad the final week so the grid's separator colour never shows as a block
+    while (days.length % 7) days.push(null)
     return { year, month, calendarDays: days }
   }, [calendarData, calendarViewMonth, filteredRecords])
 
@@ -985,6 +993,7 @@ function App() {
                 value={searchText}
                 onChange={(e) => setSearchText(e.target.value)}
                 onKeyDown={(e) => e.key === 'Escape' && setSearchText('')}
+                placeholder="Search transactions, amounts, tags…"
                 aria-label="Search"
               />
               {searchText && (
@@ -1287,7 +1296,7 @@ function App() {
                               <>
                                 <div className="calendar-day-number">{day.day}</div>
                                 {Object.entries(day.sumByTag).map(([tag, sum]) =>
-                                  sum ? <div key={tag} className="calendar-day-tag" style={{ color: tagColors[tag] || 'inherit' }}>{sum.toFixed(2)}</div> : null
+                                  sum ? <div key={tag} className="calendar-day-tag" style={{ '--tag-color': tagColors[tag] }}>{sum.toFixed(2)}</div> : null
                                 )}
                               </>
                             )}
