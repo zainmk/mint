@@ -23,6 +23,17 @@ function formatDisplayDate(str) {
   return new Date(y, m - 1, d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
 }
 
+// Shift a YYYY-MM-DD string by whole calendar months, clamping to the last
+// valid day of the target month (Mar 31 back a month → Feb 28, not Mar 3).
+function shiftMonth(str, delta) {
+  const date = strToDate(str)
+  if (!date || Number.isNaN(date.getTime())) return null
+  const target = new Date(date.getFullYear(), date.getMonth() + delta, 1)
+  const y = target.getFullYear(), m = target.getMonth()
+  const daysInTarget = new Date(y, m + 1, 0).getDate()
+  return dateToStr(new Date(y, m, Math.min(date.getDate(), daysInTarget)))
+}
+
 function parseAmount(str) {
   const n = parseFloat(String(str || '').replace(/[^0-9.-]/g, ''))
   return Number.isFinite(n) ? n : 0
@@ -68,6 +79,15 @@ function computeTagHotkeys(tags) {
   return map
 }
 const TAG_COLORS = ['#2d8a6e', '#e07b54', '#5b8dd9', '#d4a843', '#9b59b6', '#e74c6e', '#1abc9c', '#e67e22']
+
+// [mode, icon, tooltip] — the icon alone carries no accessible name
+const CHART_TABS = [
+  ['bar', '▯', 'Bar chart'],
+  ['pie', '⊗', 'Pie chart'],
+  ['calendar', '🗓', 'Calendar view'],
+  ['trend', '↗', 'Monthly trend'],
+  ['insights', '#', 'Insights'],
+]
 
 // ── IndexedDB ──────────────────────────────────────────────────────────────
 
@@ -676,6 +696,19 @@ function App() {
     return { min: dates[0], max: dates[dates.length - 1] }
   }, [records])
 
+  // Pull FROM to one month before TO, and push TO to one month after FROM
+  const handleBackOneMonth = () => {
+    const to = normalizeDateValue(dateTo)
+    const next = to ? shiftMonth(to, -1) : null
+    if (next) setDateFrom(next)
+  }
+
+  const handleForwardOneMonth = () => {
+    const from = normalizeDateValue(dateFrom)
+    const next = from ? shiftMonth(from, 1) : null
+    if (next) setDateTo(next)
+  }
+
   const changeCalendarMonth = (delta) =>
     setCalendarViewMonth((cur) => {
       const [y, m] = cur ? cur.split('-').map(Number) : [new Date().getFullYear(), new Date().getMonth() + 1]
@@ -960,7 +993,6 @@ function App() {
             </div>
             <div className="date-filters-row">
               {/* row 1: pickers */}
-              <div />
               <div className="date-picker-wrap">
                 <DatePicker selected={strToDate(dateFrom)} onChange={(d) => setDateFrom(dateToStr(d))}
                   dateFormat="MMM d, yyyy" className="filter-date-input" calendarClassName="mint-calendar"
@@ -971,12 +1003,23 @@ function App() {
                   dateFormat="MMM d, yyyy" className="filter-date-input" calendarClassName="mint-calendar"
                   popperProps={{ strategy: 'fixed' }} />
               </div>
-              <div />
-              {/* row 2: buttons + labels */}
-              <button type="button" className="date-jump-btn" onClick={() => recordDateRange.min && setDateFrom(recordDateRange.min)} title="Jump to first record date">«</button>
-              <span className="date-filter-label">FROM</span>
-              <span className="date-filter-label">TO</span>
-              <button type="button" className="date-jump-btn" onClick={() => recordDateRange.max && setDateTo(recordDateRange.max)} title="Jump to last record date">»</button>
+              {/* row 2: arrows flush with each picker's outer edge, label between */}
+              <div className="date-controls">
+                <button type="button" className="date-jump-btn" onClick={() => recordDateRange.min && setDateFrom(recordDateRange.min)} title="Jump to first record date">«</button>
+                <button type="button" className="date-jump-btn" onClick={handleBackOneMonth}
+                  disabled={!normalizeDateValue(dateTo)}
+                  title="Set FROM to one month before the TO date"
+                  aria-label="Set from date to one month before the to date">‹</button>
+                <span className="date-filter-label">FROM</span>
+              </div>
+              <div className="date-controls">
+                <span className="date-filter-label">TO</span>
+                <button type="button" className="date-jump-btn" onClick={handleForwardOneMonth}
+                  disabled={!normalizeDateValue(dateFrom)}
+                  title="Set TO to one month after the FROM date"
+                  aria-label="Set to date to one month after the from date">›</button>
+                <button type="button" className="date-jump-btn" onClick={() => recordDateRange.max && setDateTo(recordDateRange.max)} title="Jump to last record date">»</button>
+              </div>
             </div>
           </div>
 
@@ -1015,9 +1058,10 @@ function App() {
 
           <div className={`chart-section${chartMode === 'calendar' ? ' chart-section--calendar' : ''}${chartMode === 'trend' ? ' chart-section--trend' : ''}`}>
             <div className="chart-tabs" role="tablist">
-              {[['bar', '▯'], ['pie', '⊗'], ['calendar', '🗓'], ['trend', '↗'], ['insights', '#']].map(([mode, icon]) => (
+              {CHART_TABS.map(([mode, icon, label]) => (
                 <button key={mode} role="tab" aria-selected={chartMode === mode}
-                  className={`chart-tab${chartMode === mode ? ' active' : ''}`} onClick={() => setChartMode(mode)}>
+                  className={`chart-tab${chartMode === mode ? ' active' : ''}`} onClick={() => setChartMode(mode)}
+                  title={label} aria-label={label}>
                   <span className="chart-tab-icon">{icon}</span>
                 </button>
               ))}

@@ -1,5 +1,10 @@
+/* #root is a flex row, so without an explicit width this box would be sized by
+   its content — switching to a wide tab (insights) would widen the whole app
+   and the table above it. Pin the width so tab changes never reflow it. */
 .app {
+  width: 100%;
   max-width: 900px;
+  box-sizing: border-box;
   margin: 0 auto;
   padding: 2rem;
   display: flex;
@@ -540,6 +545,8 @@
 
 /* ── Filters ── */
 .table-actions {
+  /* shared by the search bar and the date row so their outer edges line up */
+  --controls-width: 420px;
   width: 100%;
   margin-bottom: 0.75rem;
   display: flex;
@@ -553,7 +560,7 @@
   display: flex;
   align-items: center;
   width: 100%;
-  max-width: 420px;
+  max-width: var(--controls-width);
 }
 
 .search-icon {
@@ -603,11 +610,13 @@
 
 .date-filters-row {
   display: grid;
-  grid-template-columns: auto 1fr 1fr auto;
+  grid-template-columns: 1fr 1fr;
   grid-template-rows: auto auto;
   column-gap: 0.6rem;
-  row-gap: 0.25rem;
+  row-gap: 0.3rem;
   align-items: center;
+  width: 100%;
+  max-width: var(--controls-width);
 }
 
 .date-picker-wrap {
@@ -634,9 +643,28 @@
   line-height: 1;
   flex-shrink: 0;
 }
-.date-jump-btn:hover {
+.date-jump-btn:hover:not(:disabled) {
   border-color: #555;
   color: #ccc;
+}
+
+.date-jump-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Row 2 of the date grid: arrows sit flush with the outer edge of the picker
+   above them, and the label takes the slack so the pair stays symmetric. */
+.date-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.date-controls .date-filter-label {
+  flex: 1;
+  min-width: 0;
 }
 
 .table-filter {
