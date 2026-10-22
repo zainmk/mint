@@ -57,7 +57,10 @@
   gap: 0.75rem;
   margin-bottom: 1.5rem;
   padding-bottom: 1rem;
-  border-bottom: 1px solid var(--line);
+  /* Divider fades out toward both ends */
+  border-width: 0 0 1px;
+  border-style: solid;
+  border-image: linear-gradient(90deg, transparent, var(--line-3) 20%, var(--line-3) 80%, transparent) 1;
 }
 
 .app h1 {
@@ -82,7 +85,7 @@
   text-align: center;
   border-radius: var(--r-xl);
   border: 1px solid var(--line);
-  background: var(--surface-1);
+  background: var(--card);
   backdrop-filter: var(--blur);
   box-shadow: inset 0 1px 0 var(--highlight), var(--sh-md);
 }
@@ -158,7 +161,7 @@
   padding: 0.55em 1.1em;
   border-radius: var(--r-sm);
   border: 1px solid var(--line);
-  background: var(--surface-1);
+  background: var(--control);
   color: var(--text-3);
   font-size: 0.82rem;
   font-weight: 500;
@@ -240,7 +243,7 @@
   padding: 0.35rem 0.7rem;
   border-radius: var(--r-pill);
   border: 1px solid var(--line);
-  background: var(--surface-1);
+  background: var(--control);
   transition: border-color var(--t-fast), background-color var(--t-fast);
 }
 
@@ -278,7 +281,7 @@
   height: 1.9rem;
   border-radius: 50%;
   border: 1px solid var(--line);
-  background: var(--surface-1);
+  background: var(--control);
   color: var(--text-3);
   font-size: 0.95rem;
   transition: color var(--t), border-color var(--t), background-color var(--t),
@@ -302,7 +305,7 @@
   padding: 0.7rem 0.85rem;
   border-radius: var(--r-md);
   border: 1px solid var(--line-2);
-  background: rgba(16, 18, 23, 0.86);
+  background: linear-gradient(180deg, rgba(48, 51, 58, 0.95), rgba(36, 39, 45, 0.95));
   backdrop-filter: var(--blur);
   box-shadow: inset 0 1px 0 var(--highlight), var(--sh-lg);
   animation: popIn var(--t) ease-out;
@@ -401,7 +404,7 @@
   padding: 3rem 2rem;
   border-radius: var(--r-xl);
   border: 1px dashed var(--line-2);
-  background: var(--surface-1);
+  background: var(--control);
 }
 
 .empty-state-icon {
@@ -461,7 +464,7 @@
   gap: 0.85rem;
   border-radius: var(--r-lg);
   border: 1px solid var(--line);
-  background: var(--surface-1);
+  background: var(--card);
   box-shadow: inset 0 1px 0 var(--highlight), var(--sh-sm);
 }
 
@@ -656,7 +659,7 @@
   height: 1.65rem;
   border-radius: var(--r-xs);
   border: 1px solid var(--line);
-  background: var(--surface-1);
+  background: var(--control);
   color: var(--text-3);
   font-size: 0.8rem;
   line-height: 1;
@@ -686,7 +689,7 @@
 .mint-calendar {
   border-radius: var(--r-md);
   border: 1px solid var(--line-2);
-  background: rgba(16, 18, 23, 0.95);
+  background: linear-gradient(180deg, rgba(46, 49, 56, 0.97), rgba(34, 37, 43, 0.97));
   backdrop-filter: var(--blur);
   font-family: inherit;
   font-size: 0.85rem;
@@ -696,7 +699,7 @@
 }
 
 .mint-calendar .react-datepicker__header {
-  background: var(--surface-1);
+  background: var(--control);
   border-bottom: 1px solid var(--line);
   border-radius: 0;
   padding-top: 0.7rem;
@@ -766,7 +769,7 @@
   max-height: min(420px, 55vh);
   border-radius: var(--r-lg);
   border: 1px solid var(--line);
-  background: var(--surface-1);
+  background: var(--card);
   box-shadow: inset 0 1px 0 var(--highlight), var(--sh-sm);
 }
 
@@ -789,7 +792,7 @@
   top: 0;
   z-index: 1;
   /* Opaque: rows scroll underneath this */
-  background: var(--solid-1);
+  background: var(--th-bg);
   font-size: 0.66rem;
   font-weight: 600;
   text-transform: uppercase;
@@ -982,7 +985,7 @@
   min-height: 520px;
   border-radius: var(--r-xl);
   border: 1px solid var(--line);
-  background: var(--surface-1);
+  background: var(--card);
   backdrop-filter: var(--blur);
   box-shadow: inset 0 1px 0 var(--highlight), var(--sh-md);
 }
@@ -1019,7 +1022,7 @@
 
 .chart-tab.active {
   color: var(--accent);
-  background: var(--surface-3);
+  background: var(--control-active);
   box-shadow: inset 0 1px 0 var(--highlight), 0 1px 3px rgba(0, 0, 0, 0.35);
 }
 
@@ -1038,18 +1041,24 @@
 }
 
 /* ── Bar chart ── */
-/* Grows to fill the card; bars stay anchored to the baseline above the total */
+/* Grows to fill the card (never shrinking below its content); bars stay
+   anchored to the baseline above the total. Sideways scroll is the last
+   resort for very many tags, so full figures never have to collide. */
 .chart-bars {
-  flex: 1;
+  flex: 1 0 auto;
   display: flex;
   align-items: flex-end;
   gap: 1rem;
   min-height: 140px;
+  overflow-x: auto;
 }
 
+/* Equal-width columns whenever they fit, but never narrower than the column's
+   own total — so every total sits on one row, centred under its bar, and two
+   can't touch. Only when they can't all fit does the row scroll sideways. */
 .chart-bar-wrap {
-  flex: 1;
-  min-width: 0;
+  flex: 1 1 0;
+  min-width: max-content;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1080,8 +1089,11 @@
   filter: brightness(1.12) saturate(1.05);
 }
 
+/* contain: the tag name never widens its column (only the total sets the
+   minimum); it fills whatever width results and truncates to fit */
 .chart-bar-label {
-  max-width: 100%;
+  contain: inline-size;
+  align-self: stretch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1095,6 +1107,7 @@
   font-weight: 550;
   color: var(--text-2);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .chart-total {
@@ -1139,15 +1152,19 @@
   justify-content: center;
 }
 
+/* The donut hole is masked out rather than painted, so the card's gradient
+   shows through it exactly. Hole radius = the inner circle's r (40 of 100). */
 .pie-chart {
   width: 210px;
   height: 210px;
+  -webkit-mask-image: radial-gradient(circle closest-side, transparent calc(40% - 0.5px), #000 40%);
+  mask-image: radial-gradient(circle closest-side, transparent calc(40% - 0.5px), #000 40%);
 }
 
 /* CSS beats the SVG presentation attributes in the markup, so the 2px slice
-   gaps and the donut hole are drawn in the surface colour. */
+   gaps follow the theme. */
 .pie-chart path {
-  stroke: var(--solid-2);
+  stroke: var(--chart-gap);
   stroke-width: 2;
   transition: opacity var(--t-fast);
 }
@@ -1161,7 +1178,7 @@
 }
 
 .pie-chart circle {
-  fill: var(--solid-1);
+  fill: transparent;
 }
 
 .pie-legend {
@@ -1224,7 +1241,7 @@
   padding: 0.25rem 0.6rem;
   border-radius: var(--r-pill);
   border: 1px solid var(--line);
-  background: var(--surface-1);
+  background: var(--control);
   font-size: 0.78rem;
   color: var(--text-2);
 }
@@ -1353,15 +1370,14 @@
   padding: 0.85rem 0.85rem 0.75rem;
   border-radius: var(--r-md);
   border: 1px solid var(--line);
-  background: var(--surface-1);
+  background: var(--card);
   box-shadow: inset 0 1px 0 var(--highlight);
-  transition: border-color var(--t), background-color var(--t),
-    transform var(--t);
+  transition: border-color var(--t), transform var(--t);
 }
 
 .insight-card:hover {
   border-color: var(--line-2);
-  background: var(--surface-2);
+  background: var(--card-raised);
   transform: translateY(-2px);
 }
 
@@ -1437,7 +1453,7 @@
   min-height: 2.3rem;
   border-radius: var(--r-pill);
   border: 1px solid var(--line);
-  background: var(--surface-1);
+  background: var(--control);
   color: var(--text-2);
   font-size: 0.95rem;
   transition: color var(--t-fast), border-color var(--t-fast),
@@ -1503,7 +1519,7 @@
 }
 
 .calendar-day:not(.empty):hover {
-  background: #12151a;
+  background: #272a30;
 }
 
 .calendar-day.empty {
@@ -1572,7 +1588,7 @@
   align-items: center;
   justify-content: center;
   padding: 1rem;
-  background: rgba(4, 6, 9, 0.6);
+  background: rgba(10, 12, 15, 0.55);
   backdrop-filter: blur(10px);
   animation: modalFadeIn var(--t) ease-out;
 }
@@ -1591,7 +1607,7 @@
   overflow: hidden;
   border-radius: var(--r-xl);
   border: 1px solid var(--line-2);
-  background: rgba(17, 19, 24, 0.86);
+  background: linear-gradient(180deg, rgba(46, 49, 56, 0.93), rgba(30, 33, 38, 0.93));
   backdrop-filter: var(--blur);
   box-shadow: inset 0 1px 0 var(--highlight), var(--sh-lg);
   animation: modalSlideIn var(--t-slow) cubic-bezier(0.22, 1, 0.36, 1);
@@ -1665,7 +1681,7 @@
   height: 2.25rem;
   border-radius: var(--r-sm);
   border: 1px solid var(--line);
-  background: var(--surface-1);
+  background: var(--control);
   color: var(--text-2);
   font-size: 1rem;
   transition: color var(--t-fast), border-color var(--t-fast),
@@ -1796,6 +1812,106 @@
   font-size: 0.95rem;
 }
 
+/* ── Confirm dialog (native <dialog>, drawn in the top layer) ─────────────── */
+.confirm-dialog {
+  width: 100%;
+  max-width: min(420px, calc(100vw - 2rem));
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  overflow: visible;
+}
+
+.confirm-dialog[open] {
+  animation: modalSlideIn var(--t-slow) cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Literal values: older engines don't let ::backdrop inherit custom properties */
+.confirm-dialog::backdrop {
+  background: rgba(10, 12, 15, 0.5);
+  backdrop-filter: blur(4px);
+  animation: modalFadeIn 180ms ease-out;
+}
+
+.confirm-panel {
+  padding: 1.35rem 1.35rem 1.15rem;
+  border-radius: var(--r-xl);
+  border: 1px solid var(--line-2);
+  background: linear-gradient(180deg, rgba(50, 53, 60, 0.97), rgba(36, 39, 45, 0.97));
+  box-shadow: inset 0 1px 0 var(--highlight), var(--sh-lg);
+}
+
+.confirm-title {
+  margin: 0 0 0.6rem;
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+.confirm-desc {
+  margin: 0 0 1.3rem;
+  font-size: 0.88rem;
+  line-height: 1.65;
+  color: var(--text-2);
+}
+
+.confirm-desc strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.confirm-desc .tag-pill {
+  vertical-align: 1px;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.confirm-cancel-btn,
+.confirm-delete-btn {
+  padding: 0.55em 1.1em;
+  border-radius: var(--r-sm);
+  font-size: 0.86rem;
+  font-weight: 600;
+  transition: color var(--t-fast), border-color var(--t-fast),
+    filter var(--t-fast), transform var(--t-fast);
+}
+
+.confirm-cancel-btn {
+  border: 1px solid var(--line-2);
+  background: var(--control);
+  color: var(--text-2);
+}
+
+.confirm-cancel-btn:hover {
+  color: var(--text);
+  border-color: var(--line-3);
+}
+
+/* White label stays ≥ 4.89:1 across the whole gradient (AA); the lighter
+   border keeps the button's edge ≥ 3:1 against the panel */
+.confirm-delete-btn {
+  border: 1px solid #e5534b;
+  background-image: linear-gradient(180deg, #cc3d38, #b8322e);
+  color: #fff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 6px 18px rgba(204, 61, 56, 0.25);
+}
+
+/* Darken rather than brighten, so hover/press only ever raise the contrast */
+.confirm-delete-btn:hover {
+  filter: brightness(0.92);
+  transform: translateY(-1px);
+}
+
+.confirm-delete-btn:active {
+  transform: translateY(0);
+  filter: brightness(0.86);
+}
+
 /* ── Responsive ───────────────────────────────────────────────────────────── */
 @media (max-width: 760px) {
   .calendar-content {
@@ -1834,6 +1950,9 @@
   .records-table td {
     padding: 0.6rem 0.7rem;
   }
+
+  /* Narrow screens: give the bars the room the gaps were taking */
+  .chart-bars { gap: 0.35rem; }
 
   .app h1 { font-size: 1.2rem; }
 

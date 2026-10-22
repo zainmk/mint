@@ -39,6 +39,25 @@ function parseAmount(str) {
   return Number.isFinite(n) ? n : 0
 }
 
+const moneyFormat = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const wholeMoneyFormat = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 })
+
+// "$1,088.39", or "$1,088" (rounded to the nearest dollar) with cents: false.
+// Grouped, with the sign ahead of the symbol.
+function formatMoney(n, { cents = true } = {}) {
+  const format = cents ? moneyFormat : wholeMoneyFormat
+  return `${n < 0 ? '-' : ''}$${format.format(Math.abs(n))}`
+}
+
+// "$1.1k" / "$988": for spots too narrow for full figures, like axis ticks
+function formatMoneyCompact(n) {
+  const a = Math.abs(n)
+  const s = a >= 999950 ? `${(a / 1e6).toFixed(1)}M`
+    : a >= 999.5 ? `${(a / 1000).toFixed(1)}k`
+    : `${Math.round(a)}`
+  return `${n < 0 ? '-' : ''}$${s}`
+}
+
 function normalizeDateValue(value) {
   const raw = String(value || '').trim()
   if (!raw) return null
@@ -85,6 +104,11 @@ function computeTagHotkeys(tags) {
 const TAG_COLORS = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767']
 // Untagged spend is "no category", so it reads as neutral rather than a hue
 const TAGLESS_COLOR = '#6b7380'
+// 'tagless' stays the internal key for untagged spend, so a real tag can never
+// merge into it; this is the name shown for it everywhere
+const tagLabel = (tag) => (tag === 'tagless' ? 'None' : tag)
+// A real tag with either name would appear twice (or collide with the key)
+const isReservedTagName = (name) => ['none', 'tagless'].includes(name.trim().toLowerCase())
 
 // [mode, icon, tooltip] — the icon alone carries no accessible name
 const CHART_TABS = [
@@ -155,13 +179,19 @@ async function readCsvFiles(csvEntries) {
     try {
       const file = await handle.getFile()
       const text = await file.text()
-      for (const rec of parseCSV(text)) {
+      const recs = parseCSV(text)
+      // Statements carry no times, so a row's position is the only clue to
+      // order within a day. Banks export newest- or oldest-first; read which
+      // from the file's first and last dates, so _seq always grows toward present.
+      const dates = recs.map((r) => normalizeDateValue(r.date)).filter(Boolean)
+      const newestFirst = dates.length > 1 && dates[0] > dates[dates.length - 1]
+      recs.forEach((rec, i) => {
         const id = makeRecordId(rec)
         if (!seen.has(id) && parseAmount(rec.amount) >= 0) {
           seen.add(id)
-          all.push({ ...rec, _id: id, _source: name })
+          all.push({ ...rec, _id: id, _source: name, _seq: newestFirst ? -i : i })
         }
-      }
+      })
     } catch { /* skip unreadable file */ }
   }
   return all
@@ -251,6 +281,7 @@ function App() {
   const [modalRecords, setModalRecords] = useState([])
   const [newTagName, setNewTagName] = useState('')
   const [renamingTag, setRenamingTag] = useState(null) // { old, draft }
+  const [pendingTagDelete, setPendingTagDelete] = useState(null) // tag awaiting delete confirmation
   // Filters & charts
   const [selectedTags, setSelectedTags] = useState([])
   const [searchText, setSearchText] = useState('')
@@ -260,6 +291,7 @@ function App() {
   const [dateTo, setDateTo] = useState(new Date().toISOString().split('T')[0])
   const [chartMode, setChartMode] = useState('bar')
   const [calendarViewMonth, setCalendarViewMonth] = useState(null)
+  const [monthStep, setMonthStep] = useState(null) // { dir, n, from, to } left by the last ‹/› click
 
   const saveTimerRef = useRef(null)
   const dirHandleRef = useRef(null)
@@ -443,7 +475,7 @@ function App() {
 
   const addTag = () => {
     const name = newTagName.trim()
-    if (!name || tags.includes(name)) return
+    if (!name || tags.includes(name) || isReservedTagName(name)) return
     setTags((t) => [...t, name])
     setSelectedTags((prev) => [...prev, name])
     setNewTagName('')
@@ -454,7 +486,7 @@ function App() {
     const { old, draft } = renamingTag
     const newName = draft.trim()
     setRenamingTag(null)
-    if (!newName || newName === old || tags.includes(newName)) return
+    if (!newName || newName === old || tags.includes(newName) || isReservedTagName(newName)) return
     setTags((prev) => prev.map((t) => (t === old ? newName : t)))
     setRecordTags((prev) => {
       const n = { ...prev }
@@ -471,6 +503,8 @@ function App() {
       for (const k of Object.keys(n)) { if (n[k] === tag) delete n[k] }
       return n
     })
+    // Drop it from the filter too, or the "All" checkbox stops matching
+    setSelectedTags((prev) => prev.filter((t) => t !== tag))
   }
 
 
@@ -495,8 +529,8 @@ function App() {
       .filter(({ row }) => {
         const tag = recordTags[row._id] ?? null
         if (query) {
-          // Search across title, amount, tag, and both raw + displayed date
-          const haystack = [row.title, row.amount, tag, row.date, formatDisplayDate(row.date)]
+          // Search across title, tag, and both raw + displayed amount and date
+          const haystack = [row.title, row.amount, formatMoney(parseAmount(row.amount)), tag, row.date, formatDisplayDate(row.date)]
             .filter(Boolean).join(' ').toLowerCase()
           if (!haystack.includes(query)) return false
         }
@@ -511,10 +545,15 @@ function App() {
         if (to && d > to) return false
         return true
       })
+      // Past → present, top to bottom; undated rows sink to the end
       .sort((a, b) => {
-        const da = normalizeDateValue(a.row.date) ?? ''
-        const db = normalizeDateValue(b.row.date) ?? ''
-        return db < da ? -1 : db > da ? 1 : 0
+        const da = normalizeDateValue(a.row.date)
+        const db = normalizeDateValue(b.row.date)
+        if (da !== db) return !da ? 1 : !db ? -1 : da < db ? -1 : 1
+        // Same day: group by file, then statement position (a total order, so
+        // the sort stays well-defined across files)
+        if (a.row._source !== b.row._source) return a.row._source < b.row._source ? -1 : 1
+        return a.row._seq - b.row._seq
       })
   }, [records, selectedTags, dateFrom, dateTo, recordTags, searchText])
 
@@ -523,6 +562,9 @@ function App() {
   useEffect(() => {
     if (!showTagModal) return
     const onKey = (e) => {
+      // The delete confirmation owns the keyboard: Escape there must cancel it,
+      // not close this modal, and letter keys must not retag the record behind
+      if (pendingTagDelete) return
       const active = document.activeElement
       if (active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA') return
       if (e.key === 'Escape') { setShowTagModal(false); return }
@@ -534,7 +576,7 @@ function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [showTagModal, modalRecordIndex, tags, tagHotkeys, modalRecords])
+  }, [showTagModal, modalRecordIndex, tags, tagHotkeys, modalRecords, pendingTagDelete])
 
 
   const chartData = useMemo(() => {
@@ -704,17 +746,40 @@ function App() {
     return { min: dates[0], max: dates[dates.length - 1] }
   }, [records])
 
-  // Pull FROM to one month before TO, and push TO to one month after FROM
-  const handleBackOneMonth = () => {
+  // ‹ moves FROM back from TO, › moves TO forward from FROM. The first click
+  // resets to one month from that opposite date; repeat clicks keep stepping a
+  // month further. Each step is counted from the anchor (TO − n months) rather
+  // than chained off the last result, so month-end clamping never drifts:
+  // Mar 31 → Feb 28 → Jan 31, not Jan 28.
+  // Steps stop at the first/last record date. Returns null when a click would
+  // change nothing, which is also what disables that arrow.
+  const planMonthStep = (dir) => {
+    const from = normalizeDateValue(dateFrom)
     const to = normalizeDateValue(dateTo)
-    const next = to ? shiftMonth(to, -1) : null
-    if (next) setDateFrom(next)
+    const anchor = dir < 0 ? to : from
+    const current = dir < 0 ? from : to
+    if (!anchor) return null
+    // A streak holds only while nothing else (pickers, «/», the other arrow) has touched either date
+    const continuing = monthStep?.dir === dir && monthStep.from === from && monthStep.to === to
+    let n = continuing ? monthStep.n + 1 : 1
+    // A reset that lands where the date already is would be a dead click, so step on
+    if (!continuing && shiftMonth(anchor, dir) === current) n = 2
+    let next = shiftMonth(anchor, dir * n)
+    if (!next) return null
+    // Cap at the records' first/last date — unless that bound lies beyond the
+    // anchor itself, where capping would turn the range inside out
+    const { min, max } = recordDateRange
+    if (dir < 0 && min && min <= anchor && next < min) next = min
+    if (dir > 0 && max && max >= anchor && next > max) next = max
+    if (next === current) return null
+    return dir < 0 ? { dir, n, from: next, to } : { dir, n, from, to: next }
   }
 
-  const handleForwardOneMonth = () => {
-    const from = normalizeDateValue(dateFrom)
-    const next = from ? shiftMonth(from, 1) : null
-    if (next) setDateTo(next)
+  const stepMonth = (dir) => {
+    const step = planMonthStep(dir)
+    if (!step) return
+    setMonthStep(step)
+    if (dir < 0) setDateFrom(step.from); else setDateTo(step.to)
   }
 
   const changeCalendarMonth = (delta) =>
@@ -856,7 +921,7 @@ function App() {
                       ) : (
                         <span className="tag-chip-label" title="Click to rename" onClick={() => setRenamingTag({ old: tag, draft: tag })}>{tag}</span>
                       )}
-                      <button type="button" onClick={() => removeTag(tag)} className="tag-chip-remove" aria-label={`Remove ${tag}`}>×</button>
+                      <button type="button" onClick={() => setPendingTagDelete(tag)} className="tag-chip-remove" aria-label={`Remove ${tag}`}>×</button>
                     </li>
                   ))}
                 </ul>
@@ -884,7 +949,7 @@ function App() {
                     <span className="modal-record-label">TITLE</span>
                     <span className="modal-record-value">{modalRecords[modalRecordIndex].row.title}</span>
                     <span className="modal-record-label">AMOUNT</span>
-                    <span className="modal-record-value">{modalRecords[modalRecordIndex].row.amount}</span>
+                    <span className="modal-record-value">{formatMoney(parseAmount(modalRecords[modalRecordIndex].row.amount))}</span>
                   </div>
 
                   <div className="modal-record-tags">
@@ -920,6 +985,39 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* Tag delete confirmation. A native modal <dialog>: it renders above
+          everything, traps focus, makes the tag modal inert, and turns Escape
+          into a cancel. Focus lands on Cancel, the first button, so a stray
+          Enter never deletes. */}
+      {pendingTagDelete && (() => {
+        const tag = pendingTagDelete
+        const count = records.filter((r) => recordTags[r._id] === tag).length
+        const pill = <span className="tag-pill" style={{ '--tag-color': tagColors[tag] }}>{tag}</span>
+        const cancel = () => setPendingTagDelete(null)
+        return (
+          <dialog className="confirm-dialog" role="alertdialog"
+            aria-labelledby="confirm-title" aria-describedby="confirm-desc"
+            ref={(d) => { if (d && !d.open) d.showModal() }}
+            onCancel={(e) => { e.preventDefault(); cancel() }}
+            onClick={(e) => e.target === e.currentTarget && cancel()}>
+            <div className="confirm-panel">
+              <h2 id="confirm-title" className="confirm-title">Delete “{tag}”?</h2>
+              <p id="confirm-desc" className="confirm-desc">
+                {count > 0
+                  ? <>{count} record{count === 1 ? '' : 's'} tagged {pill} will be reset to <strong>None</strong>.</>
+                  : <>No records are tagged {pill}, so only the tag itself is removed.</>}
+                {' '}This can’t be undone.
+              </p>
+              <div className="confirm-actions">
+                <button type="button" className="confirm-cancel-btn" onClick={cancel}>Cancel</button>
+                <button type="button" className="confirm-delete-btn"
+                  onClick={() => { removeTag(tag); cancel() }}>Delete</button>
+              </div>
+            </div>
+          </dialog>
+        )
+      })()}
 
       {/* Header */}
       <header className="app-header">
@@ -981,7 +1079,7 @@ function App() {
                 ))}
                 <label className="filter-checkbox">
                   <input type="checkbox" checked={selectedTags.includes('tagless')} onChange={() => toggleTag('tagless')} />
-                  tagless
+                  {tagLabel('tagless')}
                 </label>
               </div>
             </div>
@@ -1015,18 +1113,18 @@ function App() {
               {/* row 2: arrows flush with each picker's outer edge, label between */}
               <div className="date-controls">
                 <button type="button" className="date-jump-btn" onClick={() => recordDateRange.min && setDateFrom(recordDateRange.min)} title="Jump to first record date">«</button>
-                <button type="button" className="date-jump-btn" onClick={handleBackOneMonth}
-                  disabled={!normalizeDateValue(dateTo)}
-                  title="Set FROM to one month before the TO date"
-                  aria-label="Set from date to one month before the to date">‹</button>
+                <button type="button" className="date-jump-btn" onClick={() => stepMonth(-1)}
+                  disabled={!planMonthStep(-1)}
+                  title="Set FROM to one month before TO — click again to keep going back (stops at the first record)"
+                  aria-label="Move from date back one month, counted from the to date">‹</button>
                 <span className="date-filter-label">FROM</span>
               </div>
               <div className="date-controls">
                 <span className="date-filter-label">TO</span>
-                <button type="button" className="date-jump-btn" onClick={handleForwardOneMonth}
-                  disabled={!normalizeDateValue(dateFrom)}
-                  title="Set TO to one month after the FROM date"
-                  aria-label="Set to date to one month after the from date">›</button>
+                <button type="button" className="date-jump-btn" onClick={() => stepMonth(1)}
+                  disabled={!planMonthStep(1)}
+                  title="Set TO to one month after FROM — click again to keep going forward (stops at the last record)"
+                  aria-label="Move to date forward one month, counted from the from date">›</button>
                 <button type="button" className="date-jump-btn" onClick={() => recordDateRange.max && setDateTo(recordDateRange.max)} title="Jump to last record date">»</button>
               </div>
             </div>
@@ -1052,7 +1150,7 @@ function App() {
                       onClick={() => { setModalRecords([...filteredRecords]); setModalRecordIndex(filteredIndex); setShowTagModal(true) }}>
                       <td className="td-date">{formatDisplayDate(row.date)}</td>
                       <td className="td-title">{row.title}</td>
-                      <td className={`td-amount ${parseAmount(row.amount) >= 0 ? 'amount--positive' : 'amount--negative'}`}>{row.amount}</td>
+                      <td className={`td-amount ${parseAmount(row.amount) >= 0 ? 'amount--positive' : 'amount--negative'}`}>{formatMoney(parseAmount(row.amount))}</td>
                       <td className="tag-cell">
                         {rowTag
                           ? <span className="tag-pill" style={{ '--tag-color': tagColors[rowTag] }}>{rowTag}</span>
@@ -1082,16 +1180,16 @@ function App() {
                   {chartData.map(({ tag, sum }) => (
                     <div key={tag} className="chart-bar-wrap">
                       <div className="chart-bar-container">
-                        <div className="chart-bar" style={{ height: `${(sum / maxChartValue) * 100}%`, backgroundColor: tagColors[tag] || '#2d8a6e' }} title={`${tag}: ${sum.toFixed(2)}`} />
+                        <div className="chart-bar" style={{ height: `${(sum / maxChartValue) * 100}%`, backgroundColor: tagColors[tag] || '#2d8a6e' }} title={`${tagLabel(tag)}: ${formatMoney(sum)}`} />
                       </div>
-                      <span className="chart-bar-label">{tag}</span>
-                      <span className="chart-bar-value">{sum.toFixed(2)}</span>
+                      <span className="chart-bar-label">{tagLabel(tag)}</span>
+                      <span className="chart-bar-value">{formatMoney(sum, { cents: false })}</span>
                     </div>
                   ))}
                 </div>
                 <div className="chart-total">
                   <span className="chart-total-label">Total</span>
-                  <span className="chart-total-value">{chartTotal.toFixed(2)}</span>
+                  <span className="chart-total-value">{formatMoney(chartTotal)}</span>
                 </div>
               </>
             )}
@@ -1110,7 +1208,7 @@ function App() {
                       {pieSlices.map(({ tag, percentage, color }) => (
                         <div key={tag} className="pie-legend-item">
                           <span className="pie-legend-color" style={{ backgroundColor: color }} />
-                          <span>{tag}: {percentage.toFixed(1)}%</span>
+                          <span>{tagLabel(tag)}: {percentage.toFixed(1)}%</span>
                         </div>
                       ))}
                     </div>
@@ -1139,7 +1237,7 @@ function App() {
                     {yTicks.map((v, i) => (
                       <g key={i}>
                         <line x1={ML} y1={yPos(v)} x2={W - MR} y2={yPos(v)} stroke="#222" strokeWidth="1" />
-                        <text x={ML - 6} y={yPos(v) + 4} textAnchor="end" fill="#555" fontSize="10">${v >= 1000 ? `${(v / 1000).toFixed(1)}k` : v.toFixed(0)}</text>
+                        <text x={ML - 6} y={yPos(v) + 4} textAnchor="end" fill="#555" fontSize="10">{formatMoneyCompact(v)}</text>
                       </g>
                     ))}
                     {months.map((mo, i) => {
@@ -1159,7 +1257,7 @@ function App() {
                           {months.map((mo, i) => {
                             const v = byMonthTag[mo]?.[tag] || 0
                             return <circle key={mo} cx={xPos(i)} cy={yPos(v)} r="3.5" fill={color}>
-                              <title>{tag} · {fmtMo(mo)}: ${v.toFixed(2)}</title>
+                              <title>{tagLabel(tag)} · {fmtMo(mo)}: {formatMoney(v)}</title>
                             </circle>
                           })}
                         </g>
@@ -1173,7 +1271,7 @@ function App() {
                         strokeDasharray="4 3" strokeLinejoin="round" strokeLinecap="round" />
                       {months.map((mo, i) => (
                         <circle key={mo} cx={xPos(i)} cy={yPos(monthTotals[i])} r="3" fill="white" fillOpacity="0.8">
-                          <title>total · {fmtMo(mo)}: ${monthTotals[i].toFixed(2)}</title>
+                          <title>total · {fmtMo(mo)}: {formatMoney(monthTotals[i])}</title>
                         </circle>
                       ))}
                     </g>
@@ -1182,7 +1280,7 @@ function App() {
                     {activeTags.map(tag => (
                       <div key={tag} className="trend-legend-item">
                         <span className="trend-legend-dot" style={{ backgroundColor: tagColors[tag] }} />
-                        <span>{tag}</span>
+                        <span>{tagLabel(tag)}</span>
                       </div>
                     ))}
                     <div className="trend-legend-item">
@@ -1208,7 +1306,7 @@ function App() {
                           const t = recordTags[row._id]
                           return (
                             <div key={row._id} className="insight-card">
-                              <span className="insight-card-value">{amount.toFixed(2)}</span>
+                              <span className="insight-card-value">{formatMoney(amount)}</span>
                               <span className="insight-card-name" title={row.title}>{row.title}</span>
                               <span className="insight-card-meta">{formatDisplayDate(row.date)}</span>
                               {t
@@ -1242,8 +1340,8 @@ function App() {
                               <tr key={g.key}>
                                 <td className="insight-td-title" title={g.label}>{g.label}</td>
                                 <td className="insight-td-num insight-td-muted">{g.count}</td>
-                                <td className="insight-td-num insight-td-muted">{g.avg.toFixed(2)}</td>
-                                <td className="insight-td-num insight-td-strong">{g.total.toFixed(2)}</td>
+                                <td className="insight-td-num insight-td-muted">{formatMoney(g.avg)}</td>
+                                <td className="insight-td-num insight-td-strong">{formatMoney(g.total)}</td>
                               </tr>
                             ))}
                           </tbody>
@@ -1259,9 +1357,9 @@ function App() {
                       <div className="insight-cards">
                         {insightsData.merchants.map((g) => (
                           <div key={g.key} className="insight-card">
-                            <span className="insight-card-value">{g.total.toFixed(2)}</span>
+                            <span className="insight-card-value">{formatMoney(g.total)}</span>
                             <span className="insight-card-name" title={g.label}>{g.label}</span>
-                            <span className="insight-card-meta">{g.count}× · avg {g.avg.toFixed(2)}</span>
+                            <span className="insight-card-meta">{g.count}× · avg {formatMoney(g.avg)}</span>
                             <span className="insight-card-meta insight-card-meta--dim">{g.share.toFixed(1)}% of total</span>
                           </div>
                         ))}
@@ -1307,7 +1405,7 @@ function App() {
                         {allTagOptions.map((tag) => (
                           <div key={tag} className="calendar-legend-item">
                             <span className="calendar-legend-color" style={{ backgroundColor: tagColors[tag] }} />
-                            <span>{tag}</span>
+                            <span>{tagLabel(tag)}</span>
                           </div>
                         ))}
                       </div>

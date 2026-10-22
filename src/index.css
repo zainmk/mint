@@ -9,35 +9,45 @@
 :root {
   color-scheme: dark;
 
-  /* Canvas — near-black with a cool cast, plus two ambient glows */
-  --bg: #08090c;
-  --glow-mint: rgba(53, 214, 164, 0.07);
-  --glow-cool: rgba(86, 134, 255, 0.055);
+  /* Canvas — charcoal grey on a soft vertical gradient, plus two ambient glows */
+  --bg: #17191e;
+  --bg-top: #20232a;
+  --bg-bottom: #14161a;
+  --glow-mint: rgba(53, 214, 164, 0.09);
+  --glow-cool: rgba(110, 140, 255, 0.07);
 
   /* Glass surfaces, lightest to heaviest. Translucent so the canvas shows. */
-  --surface-1: rgba(255, 255, 255, 0.022);
-  --surface-2: rgba(255, 255, 255, 0.042);
-  --surface-3: rgba(255, 255, 255, 0.07);
-  --surface-sunken: rgba(0, 0, 0, 0.25);
+  --surface-1: rgba(255, 255, 255, 0.04);
+  --surface-2: rgba(255, 255, 255, 0.07);
+  --surface-3: rgba(255, 255, 255, 0.1);
+  --surface-sunken: rgba(0, 0, 0, 0.2);
 
-  /* Opaque equivalents, for anything that must not show what is behind it:
-     sticky table headers, calendar cells, the donut hole. */
-  --solid-1: #0d0f13;
-  --solid-2: #0a0c0f;
+  /* Gradient fills: cards and controls are lit from the top edge */
+  --card: linear-gradient(180deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.035));
+  --card-raised: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.05));
+  --control: linear-gradient(180deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.035));
+  --control-active: linear-gradient(180deg, rgba(255, 255, 255, 0.15), rgba(255, 255, 255, 0.075));
+
+  /* Opaque greys, for anything that must not show what is behind it */
+  --solid-1: #202328;    /* calendar cells + headers */
+  --solid-2: #1c1e22;    /* empty calendar cells */
+  --th-bg: #2a2d33;      /* sticky table header — rows scroll beneath */
+  --chart-gap: #25272c;  /* pie slice separators, ≈ the chart card */
 
   /* Hairlines. --highlight is the 1px inset that gives glass a lit top edge. */
-  --line: rgba(255, 255, 255, 0.075);
-  --line-2: rgba(255, 255, 255, 0.12);
-  --line-3: rgba(255, 255, 255, 0.2);
-  --highlight: rgba(255, 255, 255, 0.07);
+  --line: rgba(255, 255, 255, 0.09);
+  --line-2: rgba(255, 255, 255, 0.14);
+  --line-3: rgba(255, 255, 255, 0.22);
+  --highlight: rgba(255, 255, 255, 0.09);
 
-  /* Text ramp, brightest to faintest. Every step clears WCAG AA (4.5:1) on
-     both the opaque surface and the lightest glass, so even the faintest
-     labels stay readable; past --text-3, hierarchy comes from size and case. */
-  --text: #e9ecf1;
-  --text-2: #aeb5c0;
-  --text-3: #8a929f;
-  --text-4: #7d8593;
+  /* Text ramp, brightest to faintest. Every step clears WCAG AA (4.5:1) at the
+     lightest point a label can sit — a card's top edge over the top of the
+     canvas (#31343a) — so even the faintest labels stay readable; past
+     --text-3, hierarchy comes from size and case. */
+  --text: #eef0f4;
+  --text-2: #bcc3cd;
+  --text-3: #a1a9b5;
+  --text-4: #959daa;
 
   /* Accent — mint, per the app's name */
   --accent: #35d6a4;
@@ -100,10 +110,11 @@ body {
   overflow-y: scroll;
   color: var(--text);
   background-color: var(--bg);
-  /* Ambient depth. Fixed so the glows stay put while the page scrolls. */
+  /* Ambient depth over a top-lit grey. Fixed so it stays put while scrolling. */
   background-image:
     radial-gradient(900px 520px at 12% -8%, var(--glow-mint), transparent 70%),
-    radial-gradient(760px 460px at 92% 2%, var(--glow-cool), transparent 70%);
+    radial-gradient(760px 460px at 92% 2%, var(--glow-cool), transparent 70%),
+    linear-gradient(180deg, var(--bg-top), var(--bg-bottom));
   background-repeat: no-repeat;
   background-attachment: fixed;
 }
